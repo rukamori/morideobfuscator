@@ -37,18 +37,18 @@ internal class PlayerScriptClient(
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.let { "/s/player/$it/player_ias.vflset/en_US/base.js" }
-                    ?: videoId
-                        ?.takeIf(VIDEO_ID_PATTERN::matches)
-                        ?.let { id ->
-                            val embedBody = client.fetchText("$YOUTUBE_ORIGIN/embed/$id", MAX_DISCOVERY_BYTES)
-                            playerPathPatterns.firstNotNullOfOrNull { pattern ->
-                                pattern.find(embedBody)?.groupValues?.getOrNull(1)
-                            } ?: playerIdPattern
-                                .find(embedBody)
-                                ?.groupValues
-                                ?.getOrNull(1)
-                                ?.let { "/s/player/$it/player_ias.vflset/en_US/base.js" }
-                        } ?: throw MoriCipherException("YouTube player URL was not found")
+                        ?: videoId
+                            ?.takeIf(VIDEO_ID_PATTERN::matches)
+                            ?.let { id ->
+                                val embedBody = client.fetchText("$YOUTUBE_ORIGIN/embed/$id", MAX_DISCOVERY_BYTES)
+                                playerPathPatterns.firstNotNullOfOrNull { pattern ->
+                                    pattern.find(embedBody)?.groupValues?.getOrNull(1)
+                                } ?: playerIdPattern
+                                    .find(embedBody)
+                                    ?.groupValues
+                                    ?.getOrNull(1)
+                                    ?.let { "/s/player/$it/player_ias.vflset/en_US/base.js" }
+                            } ?: throw MoriCipherException("YouTube player URL was not found")
 
                 val normalizedPath =
                     discoveredPath

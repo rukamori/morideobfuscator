@@ -10,7 +10,10 @@ package moe.rukamori.archivetune.morideobfuscator
 import java.security.MessageDigest
 
 internal class JavaScriptPlanCompiler {
-    fun compile(script: PlayerScript, nowMillis: Long): TransformPlan {
+    fun compile(
+        script: PlayerScript,
+        nowMillis: Long,
+    ): TransformPlan {
         val signatureFunction = findFunctionName(script.source, signatureCallPatterns)
         val nFunction = findFunctionName(script.source, nCallPatterns)
         val signatureProgram = signatureFunction?.let { buildProgram(script.source, it) }
@@ -38,12 +41,20 @@ internal class JavaScriptPlanCompiler {
         patterns: List<Regex>,
     ): String? =
         patterns.firstNotNullOfOrNull { regex ->
-            regex.find(source)?.groupValues?.getOrNull(1)?.takeIf(IDENTIFIER_PATTERN::matches)
+            regex
+                .find(source)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.takeIf(IDENTIFIER_PATTERN::matches)
         }
 
     private fun findSignatureTimestamp(source: String): Int? =
         signatureTimestampPatterns.firstNotNullOfOrNull { regex ->
-            regex.find(source)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            regex
+                .find(source)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
         }
 
     private fun buildProgram(
@@ -104,7 +115,9 @@ internal class JavaScriptPlanCompiler {
                     -> findBalancedDeclarationEnd(source, match.range.last + 1, '{', '}')
 
                     DeclarationKind.OBJECT -> findBalancedDeclarationEnd(source, match.range.last, '{', '}')
+
                     DeclarationKind.ARRAY -> findBalancedDeclarationEnd(source, match.range.last, '[', ']')
+
                     DeclarationKind.SIMPLE -> source.indexOf(';', match.range.last).takeIf { it >= 0 }
                 } ?: continue
             return source.substring(start, (end + 1).coerceAtMost(source.length)).trimStart(',', ';')
@@ -131,11 +144,17 @@ internal class JavaScriptPlanCompiler {
             val current = source[index]
             val next = source.getOrNull(index + 1)
             when {
-                lineComment -> if (current == '\n') lineComment = false
-                blockComment -> if (current == '*' && next == '/') {
-                    blockComment = false
-                    index++
+                lineComment -> {
+                    if (current == '\n') lineComment = false
                 }
+
+                blockComment -> {
+                    if (current == '*' && next == '/') {
+                        blockComment = false
+                        index++
+                    }
+                }
+
                 quote != null -> {
                     when {
                         escaped -> escaped = false
@@ -143,16 +162,25 @@ internal class JavaScriptPlanCompiler {
                         current == quote -> quote = null
                     }
                 }
+
                 current == '/' && next == '/' -> {
                     lineComment = true
                     index++
                 }
+
                 current == '/' && next == '*' -> {
                     blockComment = true
                     index++
                 }
-                current == '\'' || current == '"' || current == '`' -> quote = current
-                current == open -> depth++
+
+                current == '\'' || current == '"' || current == '`' -> {
+                    quote = current
+                }
+
+                current == open -> {
+                    depth++
+                }
+
                 current == close -> {
                     depth--
                     if (depth == 0) {

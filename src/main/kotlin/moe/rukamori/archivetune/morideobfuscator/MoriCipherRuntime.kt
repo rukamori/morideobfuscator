@@ -66,65 +66,65 @@ object MoriCipherRuntime : MoriCipherResolver {
 
         val result =
             try {
-            runCatching {
-                val current = currentEngine.artifact
-                val now = System.currentTimeMillis()
-                if (
-                    !force &&
-                    current != null &&
-                    now - current.plan.createdAtMillis < currentEngine.config.refreshIntervalMillis
-                ) {
-                    return@runCatching CipherRefreshResult(
-                        playerId = current.plan.playerId,
-                        refreshedAtMillis = current.plan.createdAtMillis,
-                        changed = false,
-                    )
-                }
+                runCatching {
+                    val current = currentEngine.artifact
+                    val now = System.currentTimeMillis()
+                    if (
+                        !force &&
+                        current != null &&
+                        now - current.plan.createdAtMillis < currentEngine.config.refreshIntervalMillis
+                    ) {
+                        return@runCatching CipherRefreshResult(
+                            playerId = current.plan.playerId,
+                            refreshedAtMillis = current.plan.createdAtMillis,
+                            changed = false,
+                        )
+                    }
 
-                mutableSnapshot.value =
-                    mutableSnapshot.value.copy(
-                        status = CipherRuntimeStatus.REFRESHING,
-                        lastFailure = null,
-                    )
-                val script = currentEngine.client.fetch(videoId)
-                val plan = currentEngine.compiler.compile(script, now)
-                executionMutex.withLock {
-                    validatePlan(currentEngine, plan)
-                }
-                val artifact = CachedTransformArtifact(plan, script.source)
-                withContext(Dispatchers.IO) { currentEngine.store.write(artifact) }
-                currentEngine.artifact = artifact
-                mutableSnapshot.value =
-                    CipherSnapshot(
-                        status = CipherRuntimeStatus.READY,
+                    mutableSnapshot.value =
+                        mutableSnapshot.value.copy(
+                            status = CipherRuntimeStatus.REFRESHING,
+                            lastFailure = null,
+                        )
+                    val script = currentEngine.client.fetch(videoId)
+                    val plan = currentEngine.compiler.compile(script, now)
+                    executionMutex.withLock {
+                        validatePlan(currentEngine, plan)
+                    }
+                    val artifact = CachedTransformArtifact(plan, script.source)
+                    withContext(Dispatchers.IO) { currentEngine.store.write(artifact) }
+                    currentEngine.artifact = artifact
+                    mutableSnapshot.value =
+                        CipherSnapshot(
+                            status = CipherRuntimeStatus.READY,
+                            playerId = plan.playerId,
+                            lastSuccessfulRefreshMillis = now,
+                            nextRefreshAtMillis = now + currentEngine.config.refreshIntervalMillis,
+                        )
+                    CipherRefreshResult(
                         playerId = plan.playerId,
-                        lastSuccessfulRefreshMillis = now,
-                        nextRefreshAtMillis = now + currentEngine.config.refreshIntervalMillis,
+                        refreshedAtMillis = now,
+                        changed = current?.plan?.sourceSha256 != plan.sourceSha256,
                     )
-                CipherRefreshResult(
-                    playerId = plan.playerId,
-                    refreshedAtMillis = now,
-                    changed = current?.plan?.sourceSha256 != plan.sourceSha256,
-                )
-            }.onFailure { failure ->
-                if (failure is CancellationException) throw failure
-                val cached = currentEngine.artifact?.plan
-                mutableSnapshot.value =
-                    CipherSnapshot(
-                        status = if (cached == null) CipherRuntimeStatus.UNINITIALIZED else CipherRuntimeStatus.DEGRADED,
-                        playerId = cached?.playerId,
-                        lastSuccessfulRefreshMillis = cached?.createdAtMillis,
-                        nextRefreshAtMillis = cached?.createdAtMillis?.plus(currentEngine.config.refreshIntervalMillis),
-                        lastFailure = failure.message,
-                    )
+                }.onFailure { failure ->
+                    if (failure is CancellationException) throw failure
+                    val cached = currentEngine.artifact?.plan
+                    mutableSnapshot.value =
+                        CipherSnapshot(
+                            status = if (cached == null) CipherRuntimeStatus.UNINITIALIZED else CipherRuntimeStatus.DEGRADED,
+                            playerId = cached?.playerId,
+                            lastSuccessfulRefreshMillis = cached?.createdAtMillis,
+                            nextRefreshAtMillis = cached?.createdAtMillis?.plus(currentEngine.config.refreshIntervalMillis),
+                            lastFailure = failure.message,
+                        )
+                }
+            } catch (cancellation: CancellationException) {
+                shared.cancel(cancellation)
+                refreshMutex.withLock {
+                    if (activeRefresh === shared) activeRefresh = null
+                }
+                throw cancellation
             }
-        } catch (cancellation: CancellationException) {
-            shared.cancel(cancellation)
-            refreshMutex.withLock {
-                if (activeRefresh === shared) activeRefresh = null
-            }
-            throw cancellation
-        }
         shared.complete(result)
         refreshMutex.withLock {
             if (activeRefresh === shared) activeRefresh = null
@@ -152,9 +152,10 @@ object MoriCipherRuntime : MoriCipherResolver {
                     cipherParameters["sp"]?.takeIf { it.isNotBlank() }
                         ?: "signature"
                 val deciphered = requireEngine().executor.executeSignature(plan, signature)
-                URLBuilder(sourceUrl).apply {
-                    parameters[signatureParameter] = deciphered
-                }.buildString()
+                URLBuilder(sourceUrl)
+                    .apply {
+                        parameters[signatureParameter] = deciphered
+                    }.buildString()
             }
         }.mapCatching { transformNParameter(videoId, it).getOrElse { _ -> it } }
 
@@ -183,7 +184,8 @@ object MoriCipherRuntime : MoriCipherResolver {
         ensureCacheLoaded(currentEngine)
         val firstPlan =
             currentEngine.artifact?.plan
-                ?: refresh(force = true, videoId = videoId).getOrElse { return Result.failure(it) }
+                ?: refresh(force = true, videoId = videoId)
+                    .getOrElse { return Result.failure(it) }
                     .let { currentEngine.artifact?.plan }
                 ?: return Result.failure(MoriCipherException("Cipher plan was unavailable"))
         return try {

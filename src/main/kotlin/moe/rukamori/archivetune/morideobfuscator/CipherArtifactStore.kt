@@ -24,7 +24,8 @@ internal class CipherArtifactStore(
     fun read(): CachedTransformArtifact? =
         runCatching {
             if (!artifactFile.isFile || artifactFile.length() > MAX_CACHE_BYTES) return null
-            json.decodeFromString<CachedTransformArtifact>(artifactFile.readText())
+            json
+                .decodeFromString<CachedTransformArtifact>(artifactFile.readText())
                 .takeIf { it.plan.sourceSha256 == it.playerJavaScript.sha256() }
         }.getOrNull()
 

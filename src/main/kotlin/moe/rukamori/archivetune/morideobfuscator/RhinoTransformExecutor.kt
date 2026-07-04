@@ -13,7 +13,6 @@ import org.mozilla.javascript.ContextAction
 import org.mozilla.javascript.ContextFactory
 import org.mozilla.javascript.EvaluatorException
 import org.mozilla.javascript.Function
-import org.mozilla.javascript.Scriptable
 
 internal class RhinoTransformExecutor {
     fun executeSignature(
@@ -52,10 +51,12 @@ internal class RhinoTransformExecutor {
                     context.setClassShutter(ClassShutter { false })
                     val scope = context.initSafeStandardObjects(null, true)
                     context.evaluateString(scope, program, "mori-player", 1, null)
-                    val function = scope.get(functionName, scope) as? Function
-                        ?: throw MoriCipherException("Compiled transform was not callable")
+                    val function =
+                        scope.get(functionName, scope) as? Function
+                            ?: throw MoriCipherException("Compiled transform was not callable")
                     val value = function.call(context, scope, scope, arrayOf(input))
-                    Context.toString(value)
+                    Context
+                        .toString(value)
                         .takeIf { it.length in 1..MAX_OUTPUT_LENGTH && SAFE_OUTPUT.matches(it) }
                         ?: throw MoriCipherException("Transform produced an invalid value")
                 },
