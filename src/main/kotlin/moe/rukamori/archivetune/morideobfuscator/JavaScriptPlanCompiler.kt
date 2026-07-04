@@ -18,16 +18,17 @@ internal class JavaScriptPlanCompiler {
         val nFunction = findNFunctionName(script.source)
         val signatureProgram = signatureFunction?.let { buildProgram(script.source, it) }
         val nProgram = nFunction?.let { buildProgram(script.source, it) }
+        val signatureTimestamp = findSignatureTimestamp(script.source)
 
-        if (signatureProgram == null && nProgram == null) {
-            throw MoriCipherException("No supported YouTube player transforms were discovered")
+        if (signatureProgram == null && nProgram == null && signatureTimestamp == null) {
+            throw MoriCipherException("No supported YouTube player capability was discovered")
         }
 
         return TransformPlan(
             playerId = script.playerId,
             playerUrl = script.url,
             sourceSha256 = script.source.sha256(),
-            signatureTimestamp = findSignatureTimestamp(script.source),
+            signatureTimestamp = signatureTimestamp,
             signatureProgram = signatureProgram,
             signatureFunction = signatureFunction,
             nProgram = nProgram,
@@ -90,20 +91,32 @@ internal class JavaScriptPlanCompiler {
         rootName: String,
     ): String? {
         val declarations = LinkedHashMap<String, String>()
+        val namespaceOwners = linkedSetOf<String>()
         val pending = ArrayDeque<String>()
         pending += rootName
 
         while (pending.isNotEmpty() && declarations.size < MAX_DECLARATIONS) {
             val name = pending.removeFirst()
-            if (name in declarations || name in ignoredIdentifiers) continue
+            if (name in declarations || name in ignoredIdentifiers || name in namespaceOwners) continue
             val declaration = findDeclaration(source, name) ?: continue
             declarations[name] = declaration
+            name
+                .substringBefore('.', missingDelimiterValue = "")
+                .takeIf(String::isNotEmpty)
+                ?.let(namespaceOwners::add)
 
             dependencyPattern
                 .findAll(declaration)
                 .map { it.groupValues[1] }
                 .filter(IDENTIFIER_PATTERN::matches)
                 .filterNot { it in declarations || it in ignoredIdentifiers }
+                .forEach(pending::addLast)
+
+            qualifiedDependencyPattern
+                .findAll(declaration)
+                .map { it.groupValues[1] }
+                .filterNot { it.substringBefore('.') in ignoredIdentifiers }
+                .filterNot(declarations::containsKey)
                 .forEach(pending::addLast)
 
             propertyOwnerPattern
@@ -116,8 +129,18 @@ internal class JavaScriptPlanCompiler {
 
         if (rootName !in declarations) return null
         
+        val namespaceInitializers =
+            namespaceOwners.joinToString(separator = "\n") { owner -> "var $owner={};" }
         val baseProgram = declarations.values.reversed().joinToString(separator = "\n")
-        val program = "var window = this; var globalThis = this; var self = this;\n$baseProgram"
+        val program =
+            buildString {
+                append("var window=this;var globalThis=this;var self=this;\n")
+                if (namespaceInitializers.isNotEmpty()) {
+                    append(namespaceInitializers)
+                    append('\n')
+                }
+                append(baseProgram)
+            }
         
         return program.takeIf { it.length <= MAX_PROGRAM_LENGTH }
     }
@@ -131,11 +154,13 @@ internal class JavaScriptPlanCompiler {
             listOf(
                 Regex("""function\s+$escaped\s*\(""") to DeclarationKind.FUNCTION,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*function\s*\(""") to DeclarationKind.ASSIGNMENT,
+                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*class(?:\s+[A-Za-z_$][\w$]*)?\s*\{""") to DeclarationKind.CLASS,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{""") to DeclarationKind.ARROW_BLOCK,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[^{;\s]""") to DeclarationKind.ARROW_EXPR,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\{""") to DeclarationKind.OBJECT,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\[""") to DeclarationKind.ARRAY,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*[A-Za-z_$][\w$]*\s*;""") to DeclarationKind.SIMPLE,
+                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=""") to DeclarationKind.INITIALIZER,
             )
 
         for ((pattern, kind) in candidates) {
@@ -145,6 +170,7 @@ internal class JavaScriptPlanCompiler {
                 when (kind) {
                     DeclarationKind.FUNCTION,
                     DeclarationKind.ASSIGNMENT,
+                    DeclarationKind.CLASS,
                     -> findBalancedDeclarationEnd(source, match.range.last + 1, '{', '}')
 
                     DeclarationKind.ARROW_BLOCK -> findBalancedDeclarationEnd(source, match.range.last, '{', '}')
@@ -156,8 +182,52 @@ internal class JavaScriptPlanCompiler {
                     DeclarationKind.ARRAY -> findBalancedDeclarationEnd(source, match.range.last, '[', ']')
 
                     DeclarationKind.SIMPLE -> source.indexOf(';', match.range.last).takeIf { it >= 0 }
+
+                    DeclarationKind.INITIALIZER -> findInitializerEnd(source, match.range.last + 1)
                 } ?: continue
-            return source.substring(start, (end + 1).coerceAtMost(source.length)).trimStart(',', ';')
+            val declaration =
+                source
+                    .substring(start, (end + 1).coerceAtMost(source.length))
+                    .trimStart(',', ';')
+            return if (declaration.endsWith(';')) declaration else "$declaration;"
+        }
+        return null
+    }
+
+    private fun findInitializerEnd(
+        source: String,
+        start: Int,
+    ): Int? {
+        var parentheses = 0
+        var brackets = 0
+        var braces = 0
+        var quote: Char? = null
+        var escaped = false
+        var index = start
+        while (index < source.length) {
+            val current = source[index]
+            if (quote != null) {
+                when {
+                    escaped -> escaped = false
+                    current == '\\' -> escaped = true
+                    current == quote -> quote = null
+                }
+                index++
+                continue
+            }
+            when (current) {
+                '\'', '"', '`' -> quote = current
+                '(' -> parentheses++
+                ')' -> parentheses--
+                '[' -> brackets++
+                ']' -> brackets--
+                '{' -> braces++
+                '}' -> braces--
+                ',', ';' -> {
+                    if (parentheses == 0 && brackets == 0 && braces == 0) return index - 1
+                }
+            }
+            index++
         }
         return null
     }
@@ -234,19 +304,23 @@ internal class JavaScriptPlanCompiler {
     private enum class DeclarationKind {
         FUNCTION,
         ASSIGNMENT,
+        CLASS,
         ARROW_BLOCK,
         ARROW_EXPR,
         OBJECT,
         ARRAY,
         SIMPLE,
+        INITIALIZER,
     }
 
     private companion object {
-        const val MAX_DECLARATIONS = 100
-        const val MAX_PROGRAM_LENGTH = 1_000_000
+        const val MAX_DECLARATIONS = 128
+        const val MAX_PROGRAM_LENGTH = 1_500_000
         val IDENTIFIER_PATTERN = Regex("""^[A-Za-z_$][\w$]*$""")
         
         val dependencyPattern = Regex("""(?<!\.|\])\b([A-Za-z_$][\w$]*)\s*\(""")
+        val qualifiedDependencyPattern =
+            Regex("""\b([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\b""")
         val propertyOwnerPattern = Regex("""\b([A-Za-z_$][\w$]*)\s*(?:\.|\[)""")
         
         val signatureCallPatterns =
