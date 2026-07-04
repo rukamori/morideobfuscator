@@ -138,9 +138,10 @@ internal class PlayerScriptClient(
                 "(KHTML, like Gecko) Chrome/137.0 Mobile Safari/537.36"
         val VIDEO_ID_PATTERN = Regex("^[A-Za-z0-9_-]{11}$")
         val PLAYER_ID_PATTERN = Regex("/s/player/([A-Za-z0-9_-]+)/")
+        
         val playerPathPatterns =
             listOf(
-                Regex("""["']([^"']*/s/player/[A-Za-z0-9_-]+/[^"']*base\.js)["']"""),
+                Regex("""["']([^"']*(?:/|\\/)s(?:/|\\/)player(?:/|\\/)[A-Za-z0-9_-]+(?:/|\\/)[^"']*base\.js)["']"""),
                 Regex("""(?:jsUrl|PLAYER_JS_URL|jsPath|script)["']?\s*:\s*["']([^"']+base\.js)["']"""),
                 Regex("""src\s*=\s*["']([^"']+/s/player/[^"']+base\.js)["']"""),
             )

@@ -65,7 +65,7 @@ internal class JavaScriptPlanCompiler {
         index: Int,
     ): String? {
         val escaped = Regex.escape(arrayName)
-        val pattern = Regex("""(?:var|let|const)\s+$escaped\s*=\s*\[([^\]]*)\]""")
+        val pattern = Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\[([^\]]*)\]""")
         return pattern
             .find(source)
             ?.groupValues
@@ -239,11 +239,13 @@ internal class JavaScriptPlanCompiler {
     }
 
     private companion object {
-        const val MAX_DECLARATIONS = 32
-        const val MAX_PROGRAM_LENGTH = 500_000
+        const val MAX_DECLARATIONS = 100
+        const val MAX_PROGRAM_LENGTH = 1_000_000
         val IDENTIFIER_PATTERN = Regex("""^[A-Za-z_$][\w$]*$""")
-        val dependencyPattern = Regex("""\b([A-Za-z_$][\w$]*)\s*\(""")
+        
+        val dependencyPattern = Regex("""(?<!\.|\])\b([A-Za-z_$][\w$]*)\s*\(""")
         val propertyOwnerPattern = Regex("""\b([A-Za-z_$][\w$]*)\s*(?:\.|\[)""")
+        
         val signatureCallPatterns =
             listOf(
                 Regex("""(?:signature|sig)\s*[,=:]\s*([A-Za-z_$][\w$]*)\("""),
@@ -252,48 +254,40 @@ internal class JavaScriptPlanCompiler {
                 Regex("""\bc\s*&&\s*\(\s*c\s*=\s*([A-Za-z_$][\w$]*)\(decodeURIComponent"""),
                 Regex("""c\s*&&\s*\(\s*c\s*=\s*decodeURIComponent\s*\([^)]*\)\s*,\s*c\s*=\s*([A-Za-z_$][\w$]*)\s*\("""),
                 Regex("""\.set\(\s*["']alr["'][^;]*;\s*c\s*&&\s*\(\s*c\s*=\s*([A-Za-z_$][\w$]*)\("""),
+                Regex("""(?:\b(?:a|b|c|sig|signature)\s*=\s*|decodeURIComponent\([^)]*\)\s*=\s*)([A-Za-z_$][\w$]*)\(decodeURIComponent\(""")
             )
+            
         val nCallPatterns =
             listOf(
+                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\("""),
+                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\("""),
                 Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\("""),
                 Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\("""),
-                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\(n\)"""),
+                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\(n\)""")
             )
+            
         val nArrayCallPatterns =
             listOf(
+                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
+                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
                 Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
                 Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(n\)"""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(""")
             )
+            
         val signatureTimestampPatterns =
             listOf(
                 Regex("""signatureTimestamp["']?\s*[:=]\s*(\d{4,8})"""),
                 Regex("""["']STS["']\s*:\s*(\d{4,8})"""),
                 Regex("""\bsts\s*[:=]\s*(\d{4,8})"""),
             )
+            
         val ignoredIdentifiers =
             setOf(
-                "Array",
-                "Boolean",
-                "Date",
-                "Error",
-                "JSON",
-                "Math",
-                "Number",
-                "Object",
-                "RegExp",
-                "String",
-                "decodeURIComponent",
-                "encodeURIComponent",
-                "parseInt",
-                "isNaN",
-                "return",
-                "if",
-                "for",
-                "while",
-                "switch",
-                "catch",
-                "function",
+                "Array", "Boolean", "Date", "Error", "JSON", "Math", "Number", "Object", "RegExp", "String",
+                "decodeURIComponent", "encodeURIComponent", "parseInt", "parseFloat", "isNaN", "isFinite",
+                "return", "if", "for", "while", "switch", "catch", "function", "var", "let", "const",
+                "true", "false", "null", "undefined", "NaN", "console", "window", "document", "this", "void"
             )
     }
 }
