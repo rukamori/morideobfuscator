@@ -127,8 +127,10 @@ internal class JavaScriptPlanCompiler {
         val candidates =
             listOf(
                 Regex("""function\s+$escaped\s*\(""") to DeclarationKind.FUNCTION,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*function\s*\(""") to DeclarationKind.ASSIGNMENT,                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\\w$]*)\s*=>\s*\{""") to DeclarationKind.ARROW_BLOCK,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\\w$]*)\s*=>\s*[^{;\\s]""") to DeclarationKind.ARROW_EXPR,                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\{""") to DeclarationKind.OBJECT,
+                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*function\s*\(""") to DeclarationKind.ASSIGNMENT,
+                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{""") to DeclarationKind.ARROW_BLOCK,
+                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[^{;\s]""") to DeclarationKind.ARROW_EXPR,
+                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\{""") to DeclarationKind.OBJECT,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\[""") to DeclarationKind.ARRAY,
                 Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*[A-Za-z_$][\w$]*\s*;""") to DeclarationKind.SIMPLE,
             )
@@ -248,20 +250,20 @@ internal class JavaScriptPlanCompiler {
                 Regex("""\.set\(\s*["'](?:signature|sig)["']\s*,\s*([A-Za-z_$][\w$]*)\("""),
                 Regex("""["']signature["']\s*,\s*([A-Za-z_$][\w$]*)\("""),
                 Regex("""\bc\s*&&\s*\(\s*c\s*=\s*([A-Za-z_$][\w$]*)\(decodeURIComponent"""),
-                Regex("""c\s*&&\s*\(\s*c\s*=\s*decodeURIComponent\s*\([^)]*\)\s*,\s*c\s*=\s*([A-Za-z_$][\\w$]*)\s*\("""),
-                Regex("""\.set\(\s*["']alr["'][^;]*;\s*c\s*&&\s*\(\s*c\s*=\s*([A-Za-z_$][\\w$]*)\("""),
+                Regex("""c\s*&&\s*\(\s*c\s*=\s*decodeURIComponent\s*\([^)]*\)\s*,\s*c\s*=\s*([A-Za-z_$][\w$]*)\s*\("""),
+                Regex("""\.set\(\s*["']alr["'][^;]*;\s*c\s*&&\s*\(\s*c\s*=\s*([A-Za-z_$][\w$]*)\("""),
             )
         val nCallPatterns =
             listOf(
-                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\\w$]*)\("""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\\w$]*)\("""),
-                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\\w$]*)\(n\)"""),
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\("""),
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\("""),
+                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\(n\)"""),
             )
         val nArrayCallPatterns =
             listOf(
-                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\\w$]*)\s*\[\s*(\\d+)\s*\]\s*\("""),
-                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\\w$]*)\s*\[\s*(\\d+)\s*\]\s*\(n\)"""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\\w$]*)\s*\[\s*(\\d+)\s*\]\s*\("""),
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
+                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(n\)"""),
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
             )
         val signatureTimestampPatterns =
             listOf(
