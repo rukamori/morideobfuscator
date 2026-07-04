@@ -141,15 +141,15 @@ object MoriCipherRuntime : MoriCipherResolver {
     ): Result<String> =
         withSelfHealingPlan(videoId) { plan ->
             executionMutex.withLock {
-                val parameters = parseQueryString(signatureCipher)
+                val cipherParameters = parseQueryString(signatureCipher)
                 val sourceUrl =
-                    parameters["url"]
+                    cipherParameters["url"]
                         ?: throw MoriCipherException("Cipher URL parameter was missing")
                 val signature =
-                    parameters["s"]
+                    cipherParameters["s"]
                         ?: throw MoriCipherException("Cipher signature parameter was missing")
                 val signatureParameter =
-                    parameters["sp"]?.takeIf { it.isNotBlank() }
+                    cipherParameters["sp"]?.takeIf { it.isNotBlank() }
                         ?: "signature"
                 val deciphered = requireEngine().executor.executeSignature(plan, signature)
                 URLBuilder(sourceUrl).apply {

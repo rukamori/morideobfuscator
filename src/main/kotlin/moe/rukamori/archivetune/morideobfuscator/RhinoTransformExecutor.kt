@@ -49,7 +49,7 @@ internal class RhinoTransformExecutor {
                 ContextAction { context ->
                     context.optimizationLevel = -1
                     context.languageVersion = Context.VERSION_ES6
-                    context.classShutter = ClassShutter { false }
+                    context.setClassShutter(ClassShutter { false })
                     val scope = context.initSafeStandardObjects(null, true)
                     context.evaluateString(scope, program, "mori-player", 1, null)
                     val function = scope.get(functionName, scope) as? Function
