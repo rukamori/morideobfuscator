@@ -32,6 +32,7 @@ data class CipherSnapshot(
     val lastSuccessfulRefreshMillis: Long? = null,
     val nextRefreshAtMillis: Long? = null,
     val lastFailure: String? = null,
+    val refreshProgressPercent: Int? = null,
 )
 
 data class CipherRefreshResult(

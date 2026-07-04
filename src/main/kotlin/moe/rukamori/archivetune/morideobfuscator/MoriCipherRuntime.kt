@@ -85,15 +85,30 @@ object MoriCipherRuntime : MoriCipherResolver {
                         mutableSnapshot.value.copy(
                             status = CipherRuntimeStatus.REFRESHING,
                             lastFailure = null,
+                            refreshProgressPercent = REFRESH_DISCOVERY_PROGRESS,
                         )
-                    val script = currentEngine.client.fetch(videoId)
+                    val script =
+                        currentEngine.client.fetch(videoId) { stage ->
+                            updateRefreshProgress(
+                                when (stage) {
+                                    PlayerScriptFetchStage.DISCOVERING -> REFRESH_DISCOVERY_PROGRESS
+                                    PlayerScriptFetchStage.DOWNLOADING -> REFRESH_DOWNLOAD_PROGRESS
+                                },
+                            )
+                        }
+                    updateRefreshProgress(REFRESH_DOWNLOADED_PROGRESS)
+                    val compiledPlan =
+                        withContext(Dispatchers.Default) {
+                            currentEngine.compiler.compile(script, now)
+                        }
+                    updateRefreshProgress(REFRESH_COMPILED_PROGRESS)
                     val plan =
                         withContext(Dispatchers.Default) {
-                            val compiledPlan = currentEngine.compiler.compile(script, now)
                             executionMutex.withLock {
                                 validatePlan(currentEngine, compiledPlan)
                             }
                         }
+                    updateRefreshProgress(REFRESH_VALIDATED_PROGRESS)
                     if (
                         plan.signatureProgram == null &&
                         plan.nProgram == null &&
@@ -103,6 +118,7 @@ object MoriCipherRuntime : MoriCipherResolver {
                     }
                     val artifact = CachedTransformArtifact(plan, script.source)
                     withContext(Dispatchers.IO) { currentEngine.store.write(artifact) }
+                    updateRefreshProgress(REFRESH_PERSISTED_PROGRESS)
                     currentEngine.artifact = artifact
                     mutableSnapshot.value =
                         CipherSnapshot(
@@ -141,6 +157,14 @@ object MoriCipherRuntime : MoriCipherResolver {
             if (activeRefresh === shared) activeRefresh = null
         }
         return result
+    }
+
+    private fun updateRefreshProgress(progressPercent: Int) {
+        mutableSnapshot.value =
+            mutableSnapshot.value.copy(
+                status = CipherRuntimeStatus.REFRESHING,
+                refreshProgressPercent = progressPercent.coerceIn(0, 100),
+            )
     }
 
     override suspend fun signatureTimestamp(videoId: String): Result<Int?> =
@@ -298,4 +322,11 @@ object MoriCipherRuntime : MoriCipherResolver {
         } else {
             "One or more player transforms require the playback fallback"
         }
+
+    private const val REFRESH_DISCOVERY_PROGRESS = 10
+    private const val REFRESH_DOWNLOAD_PROGRESS = 30
+    private const val REFRESH_DOWNLOADED_PROGRESS = 50
+    private const val REFRESH_COMPILED_PROGRESS = 75
+    private const val REFRESH_VALIDATED_PROGRESS = 90
+    private const val REFRESH_PERSISTED_PROGRESS = 100
 }

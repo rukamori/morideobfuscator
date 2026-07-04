@@ -21,13 +21,22 @@ internal data class PlayerScript(
     val source: String,
 )
 
+internal enum class PlayerScriptFetchStage {
+    DISCOVERING,
+    DOWNLOADING,
+}
+
 internal class PlayerScriptClient(
     private val proxyProvider: () -> Proxy?,
 ) {
-    suspend fun fetch(videoId: String?): PlayerScript =
+    suspend fun fetch(
+        videoId: String?,
+        onStageChanged: (PlayerScriptFetchStage) -> Unit,
+    ): PlayerScript =
         withContext(Dispatchers.IO) {
             val client = createClient()
             try {
+                onStageChanged(PlayerScriptFetchStage.DISCOVERING)
                 val iframeBody = client.fetchText(IFRAME_API_URL, MAX_DISCOVERY_BYTES)
                 val discoveredPath =
                     playerPathPatterns.firstNotNullOfOrNull { pattern ->
@@ -63,7 +72,8 @@ internal class PlayerScriptClient(
                         ?.groupValues
                         ?.getOrNull(1)
                         ?: throw MoriCipherException("YouTube player identifier was invalid")
-                
+
+                onStageChanged(PlayerScriptFetchStage.DOWNLOADING)
                 val source = client.fetchText(playerUrl, MAX_PLAYER_BYTES)
                 PlayerScript(playerId = playerId, url = playerUrl, source = source)
             } finally {
