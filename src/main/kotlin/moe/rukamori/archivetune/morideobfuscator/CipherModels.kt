@@ -61,7 +61,11 @@ interface MoriCipherResolver {
     ): Result<String>
 }
 
-class MoriCipherException(
+open class MoriCipherException(
     message: String,
     cause: Throwable? = null,
 ) : Exception(message, cause)
+
+internal class MoriCipherCapabilityException(
+    message: String,
+) : MoriCipherException(message)
