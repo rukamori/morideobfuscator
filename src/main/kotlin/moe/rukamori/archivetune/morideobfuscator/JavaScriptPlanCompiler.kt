@@ -115,7 +115,9 @@ internal class JavaScriptPlanCompiler {
         }
 
         if (rootName !in declarations) return null
-        val program = declarations.values.reversed().joinToString(separator = "\n")
+        val baseProgram = declarations.values.reversed().joinToString(separator = "\n")
+        val program = "var window = this; var globalThis = this; var self = this;\n$baseProgram"
+        
         return program.takeIf { it.length <= MAX_PROGRAM_LENGTH }
     }
 
@@ -259,20 +261,20 @@ internal class JavaScriptPlanCompiler {
             
         val nCallPatterns =
             listOf(
-                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\("""),
-                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\("""),
-                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\("""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\("""),
+                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\("`),
+                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\("`),
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\("`),
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\("`),
                 Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\(n\)""")
             )
             
         val nArrayCallPatterns =
             listOf(
-                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
-                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
-                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("""),
+                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("`),
+                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("`),
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("`),
                 Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(n\)"""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(""")
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\("`)
             )
             
         val signatureTimestampPatterns =
