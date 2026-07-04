@@ -50,17 +50,20 @@ internal class PlayerScriptClient(
                                     ?.let { "/s/player/$it/player_ias.vflset/en_US/base.js" }
                             } ?: throw MoriCipherException("YouTube player URL was not found")
 
-                val normalizedPath =
-                    discoveredPath
-                        .replace("\\/", "/")
-                        .let { if (it.startsWith("/")) it else "/$it" }
-                val playerUrl = "$YOUTUBE_ORIGIN$normalizedPath"
+                val unescapedPath = discoveredPath.replace("\\/", "/")
+                val playerUrl = when {
+                    unescapedPath.startsWith("http") -> unescapedPath
+                    unescapedPath.startsWith("//") -> "https:$unescapedPath"
+                    else -> "$YOUTUBE_ORIGIN${if (unescapedPath.startsWith("/")) "" else "/"}$unescapedPath"
+                }
+                
                 val playerId =
                     PLAYER_ID_PATTERN
-                        .find(normalizedPath)
+                        .find(playerUrl)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?: throw MoriCipherException("YouTube player identifier was invalid")
+                
                 val source = client.fetchText(playerUrl, MAX_PLAYER_BYTES)
                 PlayerScript(playerId = playerId, url = playerUrl, source = source)
             } finally {
