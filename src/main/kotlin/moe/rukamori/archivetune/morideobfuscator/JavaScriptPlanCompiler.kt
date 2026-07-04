@@ -16,8 +16,23 @@ internal class JavaScriptPlanCompiler {
     ): TransformPlan {
         val signatureFunction = findFunctionName(script.source, signatureCallPatterns)
         val nFunction = findNFunctionName(script.source)
-        val signatureProgram = signatureFunction?.let { buildProgram(script.source, it) }
-        val nProgram = nFunction?.let { buildProgram(script.source, it) }
+        val declarationCache = HashMap<String, String?>()
+        val signatureProgram =
+            signatureFunction?.let {
+                buildProgram(
+                    source = script.source,
+                    rootName = it,
+                    declarationCache = declarationCache,
+                )
+            }
+        val nProgram =
+            nFunction?.let {
+                buildProgram(
+                    source = script.source,
+                    rootName = it,
+                    declarationCache = declarationCache,
+                )
+            }
         val signatureTimestamp = findSignatureTimestamp(script.source)
 
         if (signatureProgram == null && nProgram == null && signatureTimestamp == null) {
@@ -89,16 +104,35 @@ internal class JavaScriptPlanCompiler {
     private fun buildProgram(
         source: String,
         rootName: String,
+        declarationCache: MutableMap<String, String?>,
     ): String? {
         val declarations = LinkedHashMap<String, String>()
         val namespaceOwners = linkedSetOf<String>()
         val pending = ArrayDeque<String>()
-        pending += rootName
+        val discovered = HashSet<String>()
+
+        fun enqueue(name: String) {
+            if (
+                discovered.size >= MAX_DEPENDENCY_CANDIDATES ||
+                name in ignoredIdentifiers ||
+                !discovered.add(name)
+            ) {
+                return
+            }
+            pending.addLast(name)
+        }
+
+        enqueue(rootName)
 
         while (pending.isNotEmpty() && declarations.size < MAX_DECLARATIONS) {
             val name = pending.removeFirst()
-            if (name in declarations || name in ignoredIdentifiers || name in namespaceOwners) continue
-            val declaration = findDeclaration(source, name) ?: continue
+            if (name in namespaceOwners) continue
+            val declaration =
+                if (declarationCache.containsKey(name)) {
+                    declarationCache[name]
+                } else {
+                    findDeclaration(source, name).also { declarationCache[name] = it }
+                } ?: continue
             declarations[name] = declaration
             name
                 .substringBefore('.', missingDelimiterValue = "")
@@ -109,22 +143,19 @@ internal class JavaScriptPlanCompiler {
                 .findAll(declaration)
                 .map { it.groupValues[1] }
                 .filter(IDENTIFIER_PATTERN::matches)
-                .filterNot { it in declarations || it in ignoredIdentifiers }
-                .forEach(pending::addLast)
+                .forEach(::enqueue)
 
             qualifiedDependencyPattern
                 .findAll(declaration)
                 .map { it.groupValues[1] }
                 .filterNot { it.substringBefore('.') in ignoredIdentifiers }
-                .filterNot(declarations::containsKey)
-                .forEach(pending::addLast)
+                .forEach(::enqueue)
 
             propertyOwnerPattern
                 .findAll(declaration)
                 .map { it.groupValues[1] }
                 .filter(IDENTIFIER_PATTERN::matches)
-                .filterNot { it in declarations || it in ignoredIdentifiers }
-                .forEach(pending::addLast)
+                .forEach(::enqueue)
         }
 
         if (rootName !in declarations) return null
@@ -149,49 +180,122 @@ internal class JavaScriptPlanCompiler {
         source: String,
         name: String,
     ): String? {
-        val escaped = Regex.escape(name)
-        val candidates =
-            listOf(
-                Regex("""function\s+$escaped\s*\(""") to DeclarationKind.FUNCTION,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*function\s*\(""") to DeclarationKind.ASSIGNMENT,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*class(?:\s+[A-Za-z_$][\w$]*)?\s*\{""") to DeclarationKind.CLASS,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{""") to DeclarationKind.ARROW_BLOCK,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[^{;\s]""") to DeclarationKind.ARROW_EXPR,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\{""") to DeclarationKind.OBJECT,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*\[""") to DeclarationKind.ARRAY,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=\s*[A-Za-z_$][\w$]*\s*;""") to DeclarationKind.SIMPLE,
-                Regex("""(?:^|[;,])\s*(?:var|let|const)?\s*$escaped\s*=""") to DeclarationKind.INITIALIZER,
-            )
+        var searchStart = 0
+        while (searchStart < source.length) {
+            val nameStart = source.indexOf(name, searchStart)
+            if (nameStart < 0) return null
+            searchStart = nameStart + name.length
+            if (!hasIdentifierBoundaries(source, nameStart, name.length)) continue
 
-        for ((pattern, kind) in candidates) {
-            val match = pattern.find(source) ?: continue
-            val start = match.range.first.coerceAtLeast(0)
-            val end =
-                when (kind) {
-                    DeclarationKind.FUNCTION,
-                    DeclarationKind.ASSIGNMENT,
-                    DeclarationKind.CLASS,
-                    -> findBalancedDeclarationEnd(source, match.range.last + 1, '{', '}')
+            findFunctionDeclarationStart(source, nameStart)?.let { declarationStart ->
+                val afterName = skipWhitespaceForward(source, nameStart + name.length)
+                if (source.getOrNull(afterName) == '(') {
+                    val declarationEnd =
+                        findBalancedDeclarationEnd(
+                            source = source,
+                            searchStart = afterName,
+                            open = '{',
+                            close = '}',
+                        )
+                    if (declarationEnd != null) {
+                        return source.normalizedDeclaration(declarationStart, declarationEnd)
+                    }
+                }
+            }
 
-                    DeclarationKind.ARROW_BLOCK -> findBalancedDeclarationEnd(source, match.range.last, '{', '}')
+            val equalsIndex = skipWhitespaceForward(source, nameStart + name.length)
+            if (source.getOrNull(equalsIndex) != '=') continue
+            if (source.getOrNull(equalsIndex + 1) == '=' || source.getOrNull(equalsIndex + 1) == '>') continue
 
-                    DeclarationKind.ARROW_EXPR -> source.indexOf(';', match.range.last).takeIf { it >= 0 }
-
-                    DeclarationKind.OBJECT -> findBalancedDeclarationEnd(source, match.range.last, '{', '}')
-
-                    DeclarationKind.ARRAY -> findBalancedDeclarationEnd(source, match.range.last, '[', ']')
-
-                    DeclarationKind.SIMPLE -> source.indexOf(';', match.range.last).takeIf { it >= 0 }
-
-                    DeclarationKind.INITIALIZER -> findInitializerEnd(source, match.range.last + 1)
-                } ?: continue
-            val declaration =
-                source
-                    .substring(start, (end + 1).coerceAtMost(source.length))
-                    .trimStart(',', ';')
-            return if (declaration.endsWith(';')) declaration else "$declaration;"
+            val declarationStart = findAssignmentDeclarationStart(source, nameStart, name) ?: continue
+            val initializerStart = skipWhitespaceForward(source, equalsIndex + 1)
+            val declarationEnd = findInitializerEnd(source, initializerStart) ?: continue
+            return source.normalizedDeclaration(declarationStart, declarationEnd)
         }
         return null
+    }
+
+    private fun hasIdentifierBoundaries(
+        source: String,
+        start: Int,
+        length: Int,
+    ): Boolean {
+        val before = source.getOrNull(start - 1)
+        val after = source.getOrNull(start + length)
+        return before?.isJavaScriptIdentifierPart() != true &&
+            after?.isJavaScriptIdentifierPart() != true
+    }
+
+    private fun findFunctionDeclarationStart(
+        source: String,
+        nameStart: Int,
+    ): Int? {
+        if (nameStart == 0 || !source[nameStart - 1].isWhitespace()) return null
+        val keywordEnd = skipWhitespaceBackward(source, nameStart - 1)
+        val keywordStart = keywordEnd - FUNCTION_KEYWORD.length + 1
+        if (keywordStart < 0 || !source.startsWith(FUNCTION_KEYWORD, keywordStart)) return null
+        if (source.getOrNull(keywordStart - 1)?.isJavaScriptIdentifierPart() == true) return null
+        return keywordStart
+    }
+
+    private fun findAssignmentDeclarationStart(
+        source: String,
+        nameStart: Int,
+        name: String,
+    ): Int? {
+        var declarationStart = nameStart
+        if ('.' !in name && nameStart > 0 && source[nameStart - 1].isWhitespace()) {
+            val keywordEnd = skipWhitespaceBackward(source, nameStart - 1)
+            declarationKeywords.firstOrNull { keyword ->
+                val keywordStart = keywordEnd - keyword.length + 1
+                keywordStart >= 0 &&
+                    source.startsWith(keyword, keywordStart) &&
+                    source.getOrNull(keywordStart - 1)?.isJavaScriptIdentifierPart() != true
+            }?.let { keyword ->
+                declarationStart = keywordEnd - keyword.length + 1
+            }
+        }
+
+        val delimiterIndex = skipWhitespaceBackward(source, declarationStart - 1)
+        return if (
+            delimiterIndex < 0 ||
+            source[delimiterIndex] == ';' ||
+            source[delimiterIndex] == ','
+        ) {
+            declarationStart
+        } else {
+            null
+        }
+    }
+
+    private fun skipWhitespaceForward(
+        source: String,
+        start: Int,
+    ): Int {
+        var index = start
+        while (index < source.length && source[index].isWhitespace()) index++
+        return index
+    }
+
+    private fun skipWhitespaceBackward(
+        source: String,
+        start: Int,
+    ): Int {
+        var index = start
+        while (index >= 0 && source[index].isWhitespace()) index--
+        return index
+    }
+
+    private fun Char.isJavaScriptIdentifierPart(): Boolean = isLetterOrDigit() || this == '_' || this == '$'
+
+    private fun String.normalizedDeclaration(
+        start: Int,
+        end: Int,
+    ): String {
+        val declaration =
+            substring(start, (end + 1).coerceAtMost(length))
+                .trimStart(',', ';')
+        return if (declaration.endsWith(';')) declaration else "$declaration;"
     }
 
     private fun findInitializerEnd(
@@ -301,22 +405,13 @@ internal class JavaScriptPlanCompiler {
         return null
     }
 
-    private enum class DeclarationKind {
-        FUNCTION,
-        ASSIGNMENT,
-        CLASS,
-        ARROW_BLOCK,
-        ARROW_EXPR,
-        OBJECT,
-        ARRAY,
-        SIMPLE,
-        INITIALIZER,
-    }
-
     private companion object {
         const val MAX_DECLARATIONS = 128
+        const val MAX_DEPENDENCY_CANDIDATES = 256
         const val MAX_PROGRAM_LENGTH = 1_500_000
+        const val FUNCTION_KEYWORD = "function"
         val IDENTIFIER_PATTERN = Regex("""^[A-Za-z_$][\w$]*$""")
+        val declarationKeywords = arrayOf("var", "let", "const")
         
         val dependencyPattern = Regex("""(?<!\.|\])\b([A-Za-z_$][\w$]*)\s*\(""")
         val qualifiedDependencyPattern =
@@ -361,8 +456,10 @@ internal class JavaScriptPlanCompiler {
             
         val ignoredIdentifiers =
             setOf(
-                "Array", "Boolean", "Date", "Error", "JSON", "Math", "Number", "Object", "RegExp", "String",
-                "decodeURIComponent", "encodeURIComponent", "parseInt", "parseFloat", "isNaN", "isFinite",
+                "Array", "BigInt", "Boolean", "Date", "Error", "Function", "Intl", "JSON", "Map", "Math",
+                "Number", "Object", "Promise", "RegExp", "Set", "String", "Symbol", "Uint8Array", "WeakMap", "WeakSet",
+                "clearInterval", "clearTimeout", "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent",
+                "isFinite", "isNaN", "parseFloat", "parseInt", "queueMicrotask", "setInterval", "setTimeout",
                 "return", "if", "for", "while", "switch", "catch", "function", "var", "let", "const",
                 "true", "false", "null", "undefined", "NaN", "console", "window", "document", "this", "void"
             )
