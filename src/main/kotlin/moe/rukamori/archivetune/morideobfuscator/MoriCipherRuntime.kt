@@ -87,19 +87,28 @@ object MoriCipherRuntime : MoriCipherResolver {
                             lastFailure = null,
                         )
                     val script = currentEngine.client.fetch(videoId)
-                    val plan = currentEngine.compiler.compile(script, now)
-                    executionMutex.withLock {
-                        validatePlan(currentEngine, plan)
+                    val compiledPlan = currentEngine.compiler.compile(script, now)
+                    val plan =
+                        executionMutex.withLock {
+                            validatePlan(currentEngine, compiledPlan)
+                        }
+                    if (
+                        plan.signatureProgram == null &&
+                        plan.nProgram == null &&
+                        plan.signatureTimestamp == null
+                    ) {
+                        throw MoriCipherException("Player configuration contained no usable capability")
                     }
                     val artifact = CachedTransformArtifact(plan, script.source)
                     withContext(Dispatchers.IO) { currentEngine.store.write(artifact) }
                     currentEngine.artifact = artifact
                     mutableSnapshot.value =
                         CipherSnapshot(
-                            status = CipherRuntimeStatus.READY,
+                            status = plan.runtimeStatus(),
                             playerId = plan.playerId,
                             lastSuccessfulRefreshMillis = now,
                             nextRefreshAtMillis = now + currentEngine.config.refreshIntervalMillis,
+                            lastFailure = plan.capabilityWarning(),
                         )
                     CipherRefreshResult(
                         playerId = plan.playerId,
@@ -192,6 +201,8 @@ object MoriCipherRuntime : MoriCipherResolver {
             Result.success(operation(firstPlan))
         } catch (cancellation: CancellationException) {
             throw cancellation
+        } catch (unavailable: MoriCipherCapabilityException) {
+            Result.failure(unavailable)
         } catch (firstFailure: Exception) {
             refresh(force = true, videoId = videoId).getOrElse {
                 return Result.failure(firstFailure)
@@ -206,21 +217,29 @@ object MoriCipherRuntime : MoriCipherResolver {
     private fun validatePlan(
         engine: Engine,
         plan: TransformPlan,
-    ) {
-        plan.signatureProgram?.let {
-            val sample = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            val result = engine.executor.executeSignature(plan, sample)
-            if (result.isBlank() || result == sample) {
-                throw MoriCipherException("Signature transform validation failed")
-            }
-        }
-        plan.nProgram?.let {
-            val sample = "abcdefghijklmnopqrstuvwxyz0123456789_-"
-            val result = engine.executor.executeN(plan, sample)
-            if (result.isBlank() || result == sample) {
-                throw MoriCipherException("Throttle transform validation failed")
-            }
-        }
+    ): TransformPlan {
+        val signatureIsValid =
+            plan.signatureProgram?.let {
+                val sample = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                runCatching { engine.executor.executeSignature(plan, sample) }
+                    .getOrNull()
+                    ?.let { result -> result.isNotBlank() && result != sample }
+                    ?: false
+            } ?: false
+        val nIsValid =
+            plan.nProgram?.let {
+                val sample = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                runCatching { engine.executor.executeN(plan, sample) }
+                    .getOrNull()
+                    ?.let { result -> result.isNotBlank() && result != sample }
+                    ?: false
+            } ?: false
+        return plan.copy(
+            signatureProgram = plan.signatureProgram.takeIf { signatureIsValid },
+            signatureFunction = plan.signatureFunction.takeIf { signatureIsValid },
+            nProgram = plan.nProgram.takeIf { nIsValid },
+            nFunction = plan.nFunction.takeIf { nIsValid },
+        )
     }
 
     private suspend fun requireEngine(): Engine {
@@ -241,10 +260,11 @@ object MoriCipherRuntime : MoriCipherResolver {
                 val plan = cached.plan
                 mutableSnapshot.value =
                     CipherSnapshot(
-                        status = CipherRuntimeStatus.READY,
+                        status = plan.runtimeStatus(),
                         playerId = plan.playerId,
                         lastSuccessfulRefreshMillis = plan.createdAtMillis,
                         nextRefreshAtMillis = plan.createdAtMillis + engine.config.refreshIntervalMillis,
+                        lastFailure = plan.capabilityWarning(),
                     )
             }
             engine.cacheLoaded.set(true)
@@ -262,4 +282,18 @@ object MoriCipherRuntime : MoriCipherResolver {
         val cacheLoaded = AtomicBoolean(false)
         val cacheLoadMutex = Mutex()
     }
+
+    private fun TransformPlan.runtimeStatus(): CipherRuntimeStatus =
+        if (signatureProgram != null && nProgram != null) {
+            CipherRuntimeStatus.READY
+        } else {
+            CipherRuntimeStatus.DEGRADED
+        }
+
+    private fun TransformPlan.capabilityWarning(): String? =
+        if (signatureProgram != null && nProgram != null) {
+            null
+        } else {
+            "One or more player transforms require the playback fallback"
+        }
 }
