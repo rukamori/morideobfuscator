@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayOutputStream
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
 
@@ -99,10 +100,27 @@ internal class PlayerScriptClient(
             if (contentLength > maximumBytes) {
                 throw MoriCipherException("YouTube player response exceeded the size limit")
             }
-            val bytes = body.source().readByteArray(maximumBytes.toLong() + 1L)
-            if (bytes.isEmpty() || bytes.size > maximumBytes) {
-                throw MoriCipherException("YouTube player response was empty or too large")
+            val initialCapacity =
+                contentLength
+                    .takeIf { it in 1..maximumBytes.toLong() }
+                    ?.toInt()
+                    ?: DEFAULT_BUFFER_SIZE
+            val output = ByteArrayOutputStream(initialCapacity)
+            body.byteStream().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var totalBytes = 0
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    totalBytes += read
+                    if (totalBytes > maximumBytes) {
+                        throw MoriCipherException("YouTube player response exceeded the size limit")
+                    }
+                    output.write(buffer, 0, read)
+                }
             }
+            val bytes = output.toByteArray()
+            if (bytes.isEmpty()) throw MoriCipherException("YouTube player response was empty")
             bytes.toString(body.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8)
         }
     }
