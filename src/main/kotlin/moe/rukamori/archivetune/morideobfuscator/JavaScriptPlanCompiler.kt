@@ -9,13 +9,16 @@ package moe.rukamori.archivetune.morideobfuscator
 
 import java.security.MessageDigest
 
+internal const val JAVA_SCRIPT_PLAN_COMPILER_VERSION = 2
+
 internal class JavaScriptPlanCompiler {
     fun compile(
         script: PlayerScript,
         nowMillis: Long,
     ): TransformPlan {
         val signatureFunction = findFunctionName(script.source, signatureCallPatterns)
-        val nFunction = findNFunctionName(script.source)
+        val nTransform = findNTransform(script.source)
+        val nFunction = nTransform.functionName
         val declarationCache = HashMap<String, String?>()
         val signatureProgram =
             signatureFunction?.let {
@@ -35,7 +38,12 @@ internal class JavaScriptPlanCompiler {
             }
         val signatureTimestamp = findSignatureTimestamp(script.source)
 
-        if (signatureProgram == null && nProgram == null && signatureTimestamp == null) {
+        if (
+            signatureProgram == null &&
+            nProgram == null &&
+            signatureTimestamp == null &&
+            nTransform.state != NTransformState.NOT_REQUIRED
+        ) {
             throw MoriCipherException("No supported YouTube player capability was discovered")
         }
 
@@ -49,6 +57,8 @@ internal class JavaScriptPlanCompiler {
             nProgram = nProgram,
             nFunction = nFunction,
             createdAtMillis = nowMillis,
+            nTransformState = nTransform.state,
+            compilerVersion = JAVA_SCRIPT_PLAN_COMPILER_VERSION,
         )
     }
 
@@ -64,15 +74,25 @@ internal class JavaScriptPlanCompiler {
                 ?.takeIf(IDENTIFIER_PATTERN::matches)
         }
 
-    private fun findNFunctionName(source: String): String? {
-        findFunctionName(source, nCallPatterns)?.let { return it }
-        for (pattern in nArrayCallPatterns) {
+    private fun findNTransform(source: String): NTransformDiscovery {
+        findFunctionName(source, nCallPatterns)?.let {
+            return NTransformDiscovery(NTransformState.REQUIRED, it)
+        }
+        for (pattern in nIndexedCallPatterns) {
             val match = pattern.find(source) ?: continue
             val arrayName = match.groupValues.getOrNull(1)?.takeIf { IDENTIFIER_PATTERN.matches(it) } ?: continue
             val index = match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
-            resolveArrayElement(source, arrayName, index)?.let { return it }
+            resolveArrayElement(source, arrayName, index)?.let {
+                return NTransformDiscovery(NTransformState.REQUIRED, it)
+            }
         }
-        return null
+        val state =
+            if (nTransformMarkers.any { it.containsMatchIn(source) }) {
+                NTransformState.UNKNOWN
+            } else {
+                NTransformState.NOT_REQUIRED
+            }
+        return NTransformDiscovery(state, null)
     }
 
     private fun resolveArrayElement(
@@ -431,20 +451,29 @@ internal class JavaScriptPlanCompiler {
             
         val nCallPatterns =
             listOf(
-                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\(["']"""),
-                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\(["']"""),
-                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\(["']"""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\(["']"""),
-                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\(n\)""")
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*[A-Za-z_$][\w$]*\s*\)"""),
+                Regex("""\[\s*["']n["']\s*]\s*\)\s*&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*[A-Za-z_$][\w$]*\s*\)"""),
+                Regex("""String\.fromCharCode\(\s*110\s*\)[\s\S]{0,256}?&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*[A-Za-z_$][\w$]*\s*\)"""),
+                Regex("""["']nn["']\s*\[\s*\+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\s*\][\s\S]{0,512}?&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\(\s*[A-Za-z_$][\w$]*\s*\)"""),
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\("""),
             )
-            
-        val nArrayCallPatterns =
+
+        val nIndexedCallPatterns =
             listOf(
-                Regex("""\.get\(\s*["']n["']\s*\)[\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(["']"""),
-                Regex("""\[\s*["']n["']\s*\][\s\S]*?&&\s*\(\s*(?:[A-Za-z_$][\w$]*\s*=\s*)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(["']"""),
-                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\([^=]+=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(["']"""),
-                Regex("""\bn\s*&&\s*\(\s*n\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(n\)"""),
-                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*\]\s*\(["']""")
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*]\s*\("""),
+                Regex("""\[\s*["']n["']\s*]\s*\)\s*&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*]\s*\("""),
+                Regex("""String\.fromCharCode\(\s*110\s*\)[\s\S]{0,256}?&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*]\s*\("""),
+                Regex("""["']nn["']\s*\[\s*\+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\s*\][\s\S]{0,512}?&&\s*\(\s*[A-Za-z_$][\w$]*\s*=\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*]\s*\("""),
+                Regex("""\.set\(\s*["']n["']\s*,\s*([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*]\s*\("""),
+            )
+
+        val nTransformMarkers =
+            listOf(
+                Regex("""["']nn["']\s*\[\s*\+"""),
+                Regex("""String\.fromCharCode\(\s*110\s*\)"""),
+                Regex("""\.get\(\s*["']n["']\s*\)\s*\)\s*&&"""),
+                Regex("""\[\s*["']n["']\s*]\s*\)\s*&&"""),
+                Regex("""\.set\(\s*["']n["']\s*,"""),
             )
             
         val signatureTimestampPatterns =
@@ -464,6 +493,11 @@ internal class JavaScriptPlanCompiler {
                 "true", "false", "null", "undefined", "NaN", "console", "window", "document", "this", "void"
             )
     }
+
+    private data class NTransformDiscovery(
+        val state: NTransformState,
+        val functionName: String?,
+    )
 }
 
 internal fun String.sha256(): String =

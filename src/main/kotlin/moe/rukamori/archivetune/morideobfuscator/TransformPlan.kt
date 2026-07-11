@@ -10,6 +10,13 @@ package moe.rukamori.archivetune.morideobfuscator
 import kotlinx.serialization.Serializable
 
 @Serializable
+internal enum class NTransformState {
+    UNKNOWN,
+    REQUIRED,
+    NOT_REQUIRED,
+}
+
+@Serializable
 internal data class TransformPlan(
     val playerId: String,
     val playerUrl: String,
@@ -20,6 +27,8 @@ internal data class TransformPlan(
     val nProgram: String?,
     val nFunction: String?,
     val createdAtMillis: Long,
+    val nTransformState: NTransformState = NTransformState.UNKNOWN,
+    val compilerVersion: Int = 0,
 )
 
 @Serializable

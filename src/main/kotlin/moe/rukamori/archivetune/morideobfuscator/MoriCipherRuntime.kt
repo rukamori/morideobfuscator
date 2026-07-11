@@ -112,7 +112,8 @@ object MoriCipherRuntime : MoriCipherResolver {
                     if (
                         plan.signatureProgram == null &&
                         plan.nProgram == null &&
-                        plan.signatureTimestamp == null
+                        plan.signatureTimestamp == null &&
+                        plan.nTransformState != NTransformState.NOT_REQUIRED
                     ) {
                         throw MoriCipherException("Player configuration contained no usable capability")
                     }
@@ -175,26 +176,30 @@ object MoriCipherRuntime : MoriCipherResolver {
     override suspend fun resolveStreamUrl(
         videoId: String,
         signatureCipher: String,
-    ): Result<String> =
-        withSelfHealingPlan(videoId) { plan ->
-            executionMutex.withLock {
-                val cipherParameters = parseQueryString(signatureCipher)
-                val sourceUrl =
-                    cipherParameters["url"]
-                        ?: throw MoriCipherException("Cipher URL parameter was missing")
-                val signature =
-                    cipherParameters["s"]
-                        ?: throw MoriCipherException("Cipher signature parameter was missing")
-                val signatureParameter =
-                    cipherParameters["sp"]?.takeIf { it.isNotBlank() }
-                        ?: "signature"
-                val deciphered = requireEngine().executor.executeSignature(plan, signature)
-                URLBuilder(sourceUrl)
-                    .apply {
-                        parameters[signatureParameter] = deciphered
-                    }.buildString()
+    ): Result<String> {
+        val signatureResult =
+            withSelfHealingPlan(videoId) { plan ->
+                executionMutex.withLock {
+                    val cipherParameters = parseQueryString(signatureCipher)
+                    val sourceUrl =
+                        cipherParameters["url"]
+                            ?: throw MoriCipherException("Cipher URL parameter was missing")
+                    val signature =
+                        cipherParameters["s"]
+                            ?: throw MoriCipherException("Cipher signature parameter was missing")
+                    val signatureParameter =
+                        cipherParameters["sp"]?.takeIf { it.isNotBlank() }
+                            ?: "signature"
+                    val deciphered = requireEngine().executor.executeSignature(plan, signature)
+                    URLBuilder(sourceUrl)
+                        .apply {
+                            parameters[signatureParameter] = deciphered
+                        }.buildString()
+                }
             }
-        }.mapCatching { transformNParameter(videoId, it).getOrElse { _ -> it } }
+        val signedUrl = signatureResult.getOrElse { return Result.failure(it) }
+        return transformNParameter(videoId, signedUrl)
+    }
 
     override suspend fun transformNParameter(
         videoId: String,
@@ -205,6 +210,7 @@ object MoriCipherRuntime : MoriCipherResolver {
                 .getOrElse { return Result.failure(MoriCipherException("Stream URL was invalid", it)) }
         val nValue = builder.parameters["n"] ?: return Result.success(url)
         return withSelfHealingPlan(videoId) { plan ->
+            if (plan.nTransformState == NTransformState.NOT_REQUIRED) return@withSelfHealingPlan url
             executionMutex.withLock {
                 val transformed = requireEngine().executor.executeN(plan, nValue)
                 builder.parameters["n"] = transformed
@@ -229,18 +235,35 @@ object MoriCipherRuntime : MoriCipherResolver {
             Result.success(operation(firstPlan))
         } catch (cancellation: CancellationException) {
             throw cancellation
-        } catch (unavailable: MoriCipherCapabilityException) {
-            Result.failure(unavailable)
         } catch (firstFailure: Exception) {
-            refresh(force = true, videoId = videoId).getOrElse {
-                return Result.failure(firstFailure)
+            val recoveredPlan = recoverPlan(currentEngine, firstPlan, videoId) ?: return Result.failure(firstFailure)
+            try {
+                Result.success(operation(recoveredPlan))
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (recoveryFailure: Exception) {
+                Result.failure(recoveryFailure)
             }
-            val refreshed =
-                currentEngine.artifact?.plan
-                    ?: return Result.failure(firstFailure)
-            runCatching { operation(refreshed) }
         }
     }
+
+    private suspend fun recoverPlan(
+        engine: Engine,
+        failedPlan: TransformPlan,
+        videoId: String,
+    ): TransformPlan? =
+        engine.recoveryMutex.withLock {
+            val currentPlan = engine.artifact?.plan
+            if (currentPlan != null && currentPlan.sourceSha256 != failedPlan.sourceSha256) {
+                return@withLock currentPlan
+            }
+            if (engine.recoveryAttemptedForSourceSha256 == failedPlan.sourceSha256) {
+                return@withLock null
+            }
+            engine.recoveryAttemptedForSourceSha256 = failedPlan.sourceSha256
+            refresh(force = true, videoId = videoId).getOrElse { return@withLock null }
+            engine.artifact?.plan
+        }
 
     private fun validatePlan(
         engine: Engine,
@@ -282,7 +305,22 @@ object MoriCipherRuntime : MoriCipherResolver {
         if (engine.cacheLoaded.get()) return
         engine.cacheLoadMutex.withLock {
             if (engine.cacheLoaded.get()) return
-            val cached = withContext(Dispatchers.IO) { engine.store.read() }
+            val stored = withContext(Dispatchers.IO) { engine.store.read() }
+            val cached =
+                stored?.let { artifact ->
+                    if (artifact.plan.compilerVersion == JAVA_SCRIPT_PLAN_COMPILER_VERSION) {
+                        artifact
+                    } else {
+                        recompileCachedArtifact(engine, artifact)
+                            .onFailure { failure ->
+                                mutableSnapshot.value =
+                                    CipherSnapshot(
+                                        status = CipherRuntimeStatus.UNINITIALIZED,
+                                        lastFailure = failure.message,
+                                    )
+                            }.getOrNull()
+                    }
+                }
             if (cached != null) {
                 engine.artifact = cached
                 val plan = cached.plan
@@ -299,6 +337,34 @@ object MoriCipherRuntime : MoriCipherResolver {
         }
     }
 
+    private suspend fun recompileCachedArtifact(
+        engine: Engine,
+        artifact: CachedTransformArtifact,
+    ): Result<CachedTransformArtifact> =
+        try {
+            val script =
+                PlayerScript(
+                    playerId = artifact.plan.playerId,
+                    url = artifact.plan.playerUrl,
+                    source = artifact.playerJavaScript,
+                )
+            val plan =
+                withContext(Dispatchers.Default) {
+                    executionMutex.withLock {
+                        validatePlan(engine, engine.compiler.compile(script, System.currentTimeMillis()))
+                    }
+                }
+            Result.success(
+                CachedTransformArtifact(plan, artifact.playerJavaScript).also { upgraded ->
+                    withContext(Dispatchers.IO) { engine.store.write(upgraded) }
+                },
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+
     private class Engine(
         val config: MoriCipherConfig,
         val client: PlayerScriptClient,
@@ -309,17 +375,21 @@ object MoriCipherRuntime : MoriCipherResolver {
     ) {
         val cacheLoaded = AtomicBoolean(false)
         val cacheLoadMutex = Mutex()
+        val recoveryMutex = Mutex()
+
+        @Volatile
+        var recoveryAttemptedForSourceSha256: String? = null
     }
 
     private fun TransformPlan.runtimeStatus(): CipherRuntimeStatus =
-        if (signatureProgram != null && nProgram != null) {
+        if (nProgram != null || nTransformState == NTransformState.NOT_REQUIRED) {
             CipherRuntimeStatus.READY
         } else {
             CipherRuntimeStatus.DEGRADED
         }
 
     private fun TransformPlan.capabilityWarning(): String? =
-        if (signatureProgram != null && nProgram != null) {
+        if (nProgram != null || nTransformState == NTransformState.NOT_REQUIRED) {
             null
         } else {
             "One or more player transforms require the playback fallback"
