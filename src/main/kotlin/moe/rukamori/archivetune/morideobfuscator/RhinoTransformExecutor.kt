@@ -46,7 +46,7 @@ internal class RhinoTransformExecutor {
         return try {
             factory.call(
                 ContextAction { context ->
-                    context.optimizationLevel = -1
+                    context.setInterpretedMode(true)
                     context.languageVersion = Context.VERSION_ES6
                     context.setClassShutter(ClassShutter { false })
                     val scope = context.initSafeStandardObjects(null, true)
