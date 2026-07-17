@@ -197,43 +197,42 @@ internal class JavaScriptPlanCompiler {
     }
 
     private fun findDeclaration(
-        source: String,
-        name: String,
-    ): String? {
-        var searchStart = 0
-        while (searchStart < source.length) {
-            val nameStart = source.indexOf(name, searchStart)
-            if (nameStart < 0) return null
-            searchStart = nameStart + name.length
-            if (!hasIdentifierBoundaries(source, nameStart, name.length)) continue
+            source: String,
+            name: String,
+        ): String? {
+            var searchStart = 0
+            while (searchStart < source.length) {
+                val nameStart = source.indexOf(name, searchStart)
+                if (nameStart < 0) return null
+                searchStart = nameStart + name.length
+                if (!hasIdentifierBoundaries(source, nameStart, name.length)) continue
 
-            findFunctionDeclarationStart(source, nameStart)?.let { declarationStart ->
-                val afterName = skipWhitespaceForward(source, nameStart + name.length)
-                if (source.getOrNull(afterName) == '(') {
-                    val declarationEnd =
-                        findBalancedDeclarationEnd(
-                            source = source,
-                            searchStart = afterName,
-                            open = '{',
-                            close = '}',
-                        )
-                    if (declarationEnd != null) {
-                        return source.normalizedDeclaration(declarationStart, declarationEnd)
+                findFunctionDeclarationStart(source, nameStart)?.let { declarationStart ->
+                    val afterName = skipWhitespaceForward(source, nameStart + name.length)
+                    if (source.getOrNull(afterName) == '(') {
+                        val declarationEnd =
+                            findBalancedDeclarationEnd(
+                                source = source,
+                                searchStart = afterName,
+                                open = '{',
+                                close = '}',
+                            )
+                        if (declarationEnd != null) {
+                            return source.normalizedDeclaration(declarationStart, declarationEnd)
+                        }
                     }
                 }
+
+                val equalsIndex = skipWhitespaceForward(source, nameStart + name.length)
+                if (source.getOrNull(equalsIndex) != '=') continue
+                if (source.getOrNull(equalsIndex + 1) == '=' || source.getOrNull(equalsIndex + 1) == '>') continue
+                val declarationStart = findAssignmentDeclarationStart(source, nameStart, name)
+                val initializerStart = skipWhitespaceForward(source, equalsIndex + 1)
+                val declarationEnd = findInitializerEnd(source, initializerStart) ?: continue
+                return source.normalizedDeclaration(declarationStart, declarationEnd)
             }
-
-            val equalsIndex = skipWhitespaceForward(source, nameStart + name.length)
-            if (source.getOrNull(equalsIndex) != '=') continue
-            if (source.getOrNull(equalsIndex + 1) == '=' || source.getOrNull(equalsIndex + 1) == '>') continue
-
-            val declarationStart = findAssignmentDeclarationStart(source, nameStart, name) ?: continue
-            val initializerStart = skipWhitespaceForward(source, equalsIndex + 1)
-            val declarationEnd = findInitializerEnd(source, initializerStart) ?: continue
-            return source.normalizedDeclaration(declarationStart, declarationEnd)
+            return null
         }
-        return null
-    }
 
     private fun hasIdentifierBoundaries(
         source: String,
@@ -259,25 +258,25 @@ internal class JavaScriptPlanCompiler {
     }
 
     private fun findAssignmentDeclarationStart(
-        source: String,
-        nameStart: Int,
-        name: String,
-    ): Int {
-        var declarationStart = nameStart
-        if ('.' !in name && nameStart > 0 && source[nameStart - 1].isWhitespace()) {
-            val keywordEnd = skipWhitespaceBackward(source, nameStart - 1)
-            declarationKeywords
-                .firstOrNull { keyword ->
-                    val keywordStart = keywordEnd - keyword.length + 1
-                    keywordStart >= 0 &&
-                        source.startsWith(keyword, keywordStart) &&
-                        source.getOrNull(keywordStart - 1)?.isJavaScriptIdentifierPart() != true
-                }?.let { keyword ->
-                    declarationStart = keywordEnd - keyword.length + 1
-                }
+            source: String,
+            nameStart: Int,
+            name: String,
+        ): Int {
+            var declarationStart = nameStart
+            if ('.' !in name && nameStart > 0 && source[nameStart - 1].isWhitespace()) {
+                val keywordEnd = skipWhitespaceBackward(source, nameStart - 1)
+                declarationKeywords
+                    .firstOrNull { keyword ->
+                        val keywordStart = keywordEnd - keyword.length + 1
+                        keywordStart >= 0 &&
+                            source.startsWith(keyword, keywordStart) &&
+                            source.getOrNull(keywordStart - 1)?.isJavaScriptIdentifierPart() != true
+                    }?.let { keyword ->
+                        declarationStart = keywordEnd - keyword.length + 1
+                    }
+            }
+            return declarationStart
         }
-        return declarationStart
-    }
 
     private fun skipWhitespaceForward(
         source: String,
@@ -300,26 +299,26 @@ internal class JavaScriptPlanCompiler {
     private fun Char.isJavaScriptIdentifierPart(): Boolean = isLetterOrDigit() || this == '_' || this == '$'
 
     private fun String.normalizedDeclaration(
-        start: Int,
-        end: Int,
-    ) backend komplet nya dulu harus enterprise grade atau modifikasi ini untuk tambahkan Kriptografi Server: String {
-        val substring = substring(start, (end + 1).coerceAtMost(length))
-        var declaration = substring.trimStart(',', ';').trim()
+            start: Int,
+            end: Int,
+        ): String {
+            val substring = substring(start, (end + 1).coerceAtMost(length))
+            var declaration = substring.trimStart(',', ';').trim()
 
-        if (declaration.contains('=') &&
-            !declaration.startsWith("var ") &&
-            !declaration.startsWith("let ") &&
-            !declaration.startsWith("const ") &&
-            !declaration.contains('.')
-        ) {
-            val lhs = declaration.substringBefore('=').trim()
-            if (IDENTIFIER_PATTERN.matches(lhs)) {
-                declaration = "var $declaration"
+            if (declaration.contains('=') &&
+                !declaration.startsWith("var ") &&
+                !declaration.startsWith("let ") &&
+                !declaration.startsWith("const ") &&
+                !declaration.contains('.')
+            ) {
+                val lhs = declaration.substringBefore('=').trim()
+                if (IDENTIFIER_PATTERN.matches(lhs)) {
+                    declaration = "var $declaration"
+                }
             }
-        }
 
-        return if (declaration.endsWith(';')) declaration else "$declaration;"
-    }
+            return if (declaration.endsWith(';')) declaration else "$declaration;"
+        }
 
     private fun findInitializerEnd(
         source: String,
