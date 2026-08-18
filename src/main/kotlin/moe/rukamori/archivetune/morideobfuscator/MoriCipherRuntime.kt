@@ -382,7 +382,7 @@ object MoriCipherRuntime : MoriCipherResolver {
     }
 
     private fun TransformPlan.runtimeStatus(): CipherRuntimeStatus =
-        if (nProgram != null || nTransformState == NTransformState.NOT_REQUIRED) {
+        if (signatureProgram != null && (nProgram != null || nTransformState == NTransformState.NOT_REQUIRED)) {
             CipherRuntimeStatus.READY
         } else {
             CipherRuntimeStatus.DEGRADED
