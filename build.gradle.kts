@@ -1,6 +1,19 @@
 plugins {
-    alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.android.library)
+}
+
+android {
+    namespace = "moe.rukamori.archivetune.morideobfuscator"
+    compileSdk = 37
+
+    defaultConfig {
+        minSdk = 26
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
 }
 
 kotlin {
@@ -8,9 +21,9 @@ kotlin {
 }
 
 dependencies {
-    implementation(libs.ktor.client.core)
-    implementation(libs.ktor.client.okhttp)
-    implementation(libs.ktor.serialization.json)
+    implementation(libs.work.runtime)
     implementation(libs.okhttp)
-    implementation(libs.rhino)
+    implementation(libs.quickjs.kt)
+    implementation(libs.bcpg)
+    implementation(libs.timber)
 }
