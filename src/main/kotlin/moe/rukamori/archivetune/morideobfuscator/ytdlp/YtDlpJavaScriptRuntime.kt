@@ -14,7 +14,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -40,6 +39,7 @@ object YtDlpJavaScriptRuntime {
                     runtime = quickJs
                     quickJs.memoryLimit = JAVASCRIPT_MEMORY_LIMIT_BYTES
                     quickJs.maxStackSize = JAVASCRIPT_STACK_LIMIT_BYTES
+                    quickJs.evaluationTimeoutMillis = JAVASCRIPT_TIMEOUT_MS
                     val wrappedSource =
                         """
                         let __archiveTuneOutput = "";
@@ -54,9 +54,7 @@ object YtDlpJavaScriptRuntime {
                         __archiveTuneOutput;
                         """.trimIndent()
                     result.complete(
-                        withTimeout(JAVASCRIPT_TIMEOUT_MS) {
-                            quickJs.evaluate<String>(wrappedSource, "yt-dlp-ejs.js")
-                        },
+                        quickJs.evaluate<String>(wrappedSource, "yt-dlp-ejs.js"),
                     )
                 } catch (throwable: Throwable) {
                     result.completeExceptionally(throwable)
@@ -68,12 +66,14 @@ object YtDlpJavaScriptRuntime {
             result.get(JAVASCRIPT_TIMEOUT_MS + COMPLETION_GRACE_MS, TimeUnit.MILLISECONDS)
         } catch (throwable: Throwable) {
             job.cancel()
-            throw IllegalStateException("JavaScript challenge execution failed", throwable)
+            val cause = throwable.cause ?: throwable
+            val detail = cause.message ?: cause.javaClass.simpleName
+            throw IllegalStateException("JavaScript challenge execution failed: $detail", cause)
         }
     }
 
-    private const val JAVASCRIPT_TIMEOUT_MS = 20_000L
+    private const val JAVASCRIPT_TIMEOUT_MS = 60_000L
     private const val COMPLETION_GRACE_MS = 2_000L
-    private const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 64L * 1024L * 1024L
+    private const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 128L * 1024L * 1024L
     private const val JAVASCRIPT_STACK_LIMIT_BYTES = 2L * 1024L * 1024L
 }
