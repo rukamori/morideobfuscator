@@ -20,9 +20,11 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.json.JSONTokener
+import timber.log.Timber
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 @Keep
@@ -36,10 +38,26 @@ object YtDlpJavaScriptRuntime {
                 Thread(runnable, "ArchiveTune-QuickJS").apply { isDaemon = true }
             }.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+    private val preWarmStarted = AtomicBoolean(false)
 
     @JvmStatic
     fun initialize(context: Context) {
         appContext = context.applicationContext
+    }
+
+    @JvmStatic
+    fun preWarm() {
+        check(Looper.myLooper() != Looper.getMainLooper())
+        if (!preWarmStarted.compareAndSet(false, true)) {
+            return
+        }
+        try {
+            validateOutput(evaluateWithQuickJs(QUICKJS_WARMUP_SOURCE), "QuickJS")
+        } catch (exception: Exception) {
+            if (!Thread.currentThread().isInterrupted) {
+                Timber.tag(TAG).w(exception, "QuickJS runtime prewarm failed")
+            }
+        }
     }
 
     @JvmStatic
@@ -201,4 +219,6 @@ object YtDlpJavaScriptRuntime {
     private const val COMPLETION_GRACE_MS = 2_000L
     private const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 128L * 1024L * 1024L
     private const val JAVASCRIPT_STACK_LIMIT_BYTES = 2L * 1024L * 1024L
+    private const val QUICKJS_WARMUP_SOURCE = "console.log('{\"type\":\"warmup\"}');"
+    private const val TAG = "YtDlpJavaScript"
 }
