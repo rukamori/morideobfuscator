@@ -8,6 +8,7 @@
 package moe.rukamori.archivetune.morideobfuscator.youtubei
 
 import android.util.Base64
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -19,10 +20,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.Proxy
+import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -35,10 +38,27 @@ internal class YoutubeiHttpClient(
     @Volatile
     private var activeClient: ActiveClient? = null
 
-    suspend fun execute(requestJson: String): String {
+    suspend fun execute(requestJson: String): String =
+        try {
+            executeRequest(requestJson)
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: SocketTimeoutException) {
+            failure(FailureKind.TIMEOUT, "youtubei.js network request timed out")
+        } catch (exception: IOException) {
+            failure(FailureKind.NETWORK, "youtubei.js network request failed")
+        } catch (exception: JSONException) {
+            failure(FailureKind.INVALID_RESPONSE, "youtubei.js request was invalid")
+        } catch (exception: IllegalArgumentException) {
+            failure(FailureKind.INVALID_RESPONSE, "youtubei.js request was rejected")
+        } catch (exception: Exception) {
+            failure(FailureKind.INTERNAL, "youtubei.js HTTP bridge failed")
+        }
+
+    private suspend fun executeRequest(requestJson: String): String {
         val parsed = JSONObject(requestJson)
         var url = parsed.getString("url").toHttpUrlOrNull()
-            ?: return failure("Invalid request URL")
+            ?: return failure(FailureKind.INVALID_RESPONSE, "Invalid request URL")
         var method = parsed.optString("method", "GET").uppercase()
         require(method in ALLOWED_METHODS)
         validateUrl(url)
@@ -90,7 +110,7 @@ internal class YoutubeiHttpClient(
                     .toString()
             }
         }
-        return failure("Extraction redirect failed")
+        return failure(FailureKind.NETWORK, "Extraction redirect failed")
     }
 
     private fun buildRequest(
@@ -246,11 +266,22 @@ internal class YoutubeiHttpClient(
             )
         }
 
-    private fun failure(message: String): String =
+    private fun failure(
+        kind: FailureKind,
+        message: String,
+    ): String =
         JSONObject()
             .put("ok", false)
+            .put("kind", kind.name)
             .put("message", message)
             .toString()
+
+    private enum class FailureKind {
+        TIMEOUT,
+        NETWORK,
+        INVALID_RESPONSE,
+        INTERNAL,
+    }
 
     private data class ActiveClient(
         val configuration: YoutubeiNetworkConfiguration,
