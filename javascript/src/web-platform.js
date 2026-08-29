@@ -368,8 +368,10 @@ async function fetch(input, init = {}) {
     }),
   );
   const response = JSON.parse(responseJson);
-  if (!response.ok) {
-    throw new TypeError(response.message || "Network request failed");
+  if (!response || response.ok !== true) {
+    const error = new TypeError(response?.message || "Network request failed");
+    error.kind = response?.kind || "NETWORK";
+    throw error;
   }
   return new Response(base64ToBytes(response.bodyBase64 || ""), {
     status: response.status,
