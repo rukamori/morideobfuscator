@@ -72,6 +72,7 @@ internal class YoutubeiDiskCache(context: Context) {
                 }
             }
         }
+    }
 
     suspend fun remove(key: String) {
         withContext(Dispatchers.IO) {
