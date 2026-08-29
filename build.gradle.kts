@@ -21,9 +21,6 @@ kotlin {
 }
 
 dependencies {
-    implementation(libs.work.runtime)
     implementation(libs.okhttp)
     implementation(libs.quickjs.kt)
-    implementation(libs.bcpg)
-    implementation(libs.timber)
 }

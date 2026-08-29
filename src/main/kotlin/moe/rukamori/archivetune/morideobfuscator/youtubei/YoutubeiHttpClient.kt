@@ -1,0 +1,291 @@
+/*
+ * ArchiveTune (2026)
+ * © Rukamori — github.com/rukamori
+ * GPL-3.0 License | Contributors: see git history
+ * Do not remove or alter this notice. - Per GPL-3.0 Section 4 & Section 5
+ */
+
+package moe.rukamori.archivetune.morideobfuscator.youtubei
+
+import android.util.Base64
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Credentials
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.net.Proxy
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+internal class YoutubeiHttpClient(
+    private val configurationProvider: () -> YoutubeiNetworkConfiguration,
+) {
+    private val clientLock = Any()
+
+    @Volatile
+    private var activeClient: ActiveClient? = null
+
+    suspend fun execute(requestJson: String): String {
+        val parsed = JSONObject(requestJson)
+        var url = parsed.getString("url").toHttpUrlOrNull()
+            ?: return failure("Invalid request URL")
+        var method = parsed.optString("method", "GET").uppercase()
+        require(method in ALLOWED_METHODS)
+        validateUrl(url)
+        var headers = parsed.optJSONObject("headers")
+        var body =
+            parsed.optString("bodyBase64")
+                .takeIf(String::isNotEmpty)
+                ?.let { Base64.decode(it, Base64.DEFAULT) }
+        var redirected = false
+
+        repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            val request = buildRequest(url, method, headers, body)
+            val response = currentClient().newCall(request).await()
+            response.use { value ->
+                validateUrl(value.request.url)
+                if (value.isRedirect) {
+                    if (redirectCount == MAX_REDIRECTS) {
+                        throw IOException("Too many extraction redirects")
+                    }
+                    val location = value.header("Location")
+                        ?: throw IOException("Extraction redirect did not include a location")
+                    val redirectedUrl = value.request.url.resolve(location)
+                        ?: throw IOException("Invalid extraction redirect location")
+                    validateUrl(redirectedUrl)
+                    if (!value.request.url.isSameOrigin(redirectedUrl)) {
+                        headers = headers?.withoutHeaders(SENSITIVE_REDIRECT_HEADERS)
+                    }
+                    if (
+                        (value.code == 301 || value.code == 302) && method == "POST" ||
+                        value.code == 303 && method != "GET" && method != "HEAD"
+                    ) {
+                        method = "GET"
+                        body = null
+                        headers = headers?.withoutHeaders(BODY_HEADERS)
+                    }
+                    url = redirectedUrl
+                    redirected = true
+                    return@use
+                }
+                val responseBytes = value.readLimitedBody()
+                return JSONObject()
+                    .put("ok", true)
+                    .put("status", value.code)
+                    .put("statusText", value.message)
+                    .put("url", value.request.url.toString())
+                    .put("redirected", redirected)
+                    .put("headers", value.headers.toJson())
+                    .put("bodyBase64", Base64.encodeToString(responseBytes, Base64.NO_WRAP))
+                    .toString()
+            }
+        }
+        return failure("Extraction redirect failed")
+    }
+
+    private fun buildRequest(
+        url: HttpUrl,
+        method: String,
+        headers: JSONObject?,
+        body: ByteArray?,
+    ): Request {
+        val builder = Request.Builder().url(url)
+        headers?.keys()?.forEach { name ->
+            val value = headers.optString(name)
+            if (isAllowedHeader(name, value)) builder.header(name, value)
+        }
+        val requestBody =
+            if (method == "POST") {
+                (body ?: ByteArray(0)).toRequestBody(
+                    headers?.optString("content-type")?.toMediaTypeOrNull(),
+                )
+            } else {
+                null
+            }
+        return builder.method(method, requestBody).build()
+    }
+
+    private fun currentClient(): OkHttpClient {
+        val configuration = configurationProvider()
+        activeClient?.takeIf { it.configuration == configuration }?.let { return it.client }
+        return synchronized(clientLock) {
+            activeClient?.takeIf { it.configuration == configuration }?.client
+                ?: buildClient(configuration).also { client ->
+                    activeClient?.client?.dispatcher?.cancelAll()
+                    activeClient?.client?.connectionPool?.evictAll()
+                    activeClient = ActiveClient(configuration, client)
+                }
+        }
+    }
+
+    private fun buildClient(configuration: YoutubeiNetworkConfiguration): OkHttpClient =
+        OkHttpClient
+            .Builder()
+            .proxy(configuration.proxy ?: Proxy.NO_PROXY)
+            .dns(configuration.dns)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .apply {
+                configuration.interceptors.forEach(::addInterceptor)
+                if (
+                    configuration.proxy != null &&
+                    !configuration.proxyUsername.isNullOrBlank() &&
+                    !configuration.proxyPassword.isNullOrBlank()
+                ) {
+                    proxyAuthenticator { _, response ->
+                        if (response.request.header("Proxy-Authorization") != null) {
+                            null
+                        } else {
+                            response.request
+                                .newBuilder()
+                                .header(
+                                    "Proxy-Authorization",
+                                    Credentials.basic(
+                                        configuration.proxyUsername,
+                                        configuration.proxyPassword,
+                                    ),
+                                ).build()
+                        }
+                    }
+                }
+            }.build()
+
+    private fun validateUrl(url: HttpUrl) {
+        require(url.isHttps)
+        val host = url.host.lowercase()
+        require(ALLOWED_HOST_SUFFIXES.any { suffix -> host == suffix || host.endsWith(".$suffix") })
+    }
+
+    private fun isAllowedHeader(
+        name: String,
+        value: String,
+    ): Boolean {
+        if (name.isBlank() || value.isBlank() || name.any { it == '\r' || it == '\n' } || value.any { it == '\r' || it == '\n' }) {
+            return false
+        }
+        val normalized = name.lowercase()
+        return normalized in ALLOWED_HEADERS || normalized.startsWith("x-goog-") || normalized.startsWith("x-youtube-")
+    }
+
+    private fun HttpUrl.isSameOrigin(other: HttpUrl): Boolean =
+        scheme == other.scheme && host == other.host && port == other.port
+
+    private fun JSONObject.withoutHeaders(excludedHeaders: Set<String>): JSONObject =
+        JSONObject().also { filtered ->
+            keys().forEach { name ->
+                if (name.lowercase() !in excludedHeaders) {
+                    filtered.put(name, opt(name))
+                }
+            }
+        }
+
+    private fun Response.readLimitedBody(): ByteArray {
+        val responseBody = body ?: return ByteArray(0)
+        val declaredLength = responseBody.contentLength()
+        require(declaredLength < 0L || declaredLength <= MAX_RESPONSE_BYTES)
+        val output = ByteArrayOutputStream(minOf(MAX_RESPONSE_BYTES, 64 * 1024))
+        responseBody.byteStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var total = 0
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                total += count
+                require(total <= MAX_RESPONSE_BYTES)
+                output.write(buffer, 0, count)
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun okhttp3.Headers.toJson(): JSONObject =
+        JSONObject().also { json ->
+            names().forEach { name ->
+                if (name.equals("set-cookie", ignoreCase = true)) return@forEach
+                json.put(name, values(name).joinToString(", "))
+            }
+        }
+
+    private suspend fun Call.await(): Response =
+        suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { cancel() }
+            enqueue(
+                object : Callback {
+                    override fun onFailure(
+                        call: Call,
+                        exception: IOException,
+                    ) {
+                        if (continuation.isActive) continuation.resumeWithException(exception)
+                    }
+
+                    override fun onResponse(
+                        call: Call,
+                        response: Response,
+                    ) {
+                        if (continuation.isActive) {
+                            continuation.resume(response)
+                        } else {
+                            response.close()
+                        }
+                    }
+                },
+            )
+        }
+
+    private fun failure(message: String): String =
+        JSONObject()
+            .put("ok", false)
+            .put("message", message)
+            .toString()
+
+    private data class ActiveClient(
+        val configuration: YoutubeiNetworkConfiguration,
+        val client: OkHttpClient,
+    )
+
+    private companion object {
+        const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+        const val MAX_REDIRECTS = 5
+        const val CONNECT_TIMEOUT_SECONDS = 15L
+        const val READ_TIMEOUT_SECONDS = 20L
+        const val WRITE_TIMEOUT_SECONDS = 20L
+        const val CALL_TIMEOUT_SECONDS = 30L
+        val ALLOWED_METHODS = setOf("GET", "POST", "HEAD")
+        val BODY_HEADERS = setOf("content-type")
+        val SENSITIVE_REDIRECT_HEADERS = setOf("authorization", "cookie")
+        val ALLOWED_HOST_SUFFIXES =
+            setOf(
+                "youtube.com",
+                "google.com",
+                "googleapis.com",
+                "googlevideo.com",
+                "ytimg.com",
+                "ggpht.com",
+            )
+        val ALLOWED_HEADERS =
+            setOf(
+                "accept",
+                "accept-language",
+                "authorization",
+                "content-type",
+                "cookie",
+                "origin",
+                "referer",
+                "user-agent",
+            )
+    }
+}
