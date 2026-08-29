@@ -23,6 +23,17 @@ const SUPPORTED_AUDIO_MIME_TYPES = new Set([
 ]);
 const ANONYMOUS_CLIENTS = ["VISIONOS", "ANDROID_VR", "IOS", "YTMUSIC"];
 const AUTHENTICATED_CLIENTS = ["WEB_CREATOR", "YTMUSIC", "WEB_EMBEDDED"];
+const FAILURE_KINDS = new Set([
+  "LOGIN_REQUIRED",
+  "UNAVAILABLE",
+  "NO_FORMAT",
+  "DECIPHER",
+  "NETWORK",
+  "HTTP",
+  "TIMEOUT",
+  "INVALID_RESPONSE",
+  "INTERNAL",
+]);
 
 installWebPlatform();
 
@@ -139,10 +150,6 @@ function compareFormats(first, second) {
 }
 
 function preferredFormat(formats, request) {
-  if (request.pinnedItag) {
-    const pinned = formats.find((format) => Number(format.itag) === Number(request.pinnedItag));
-    if (pinned) return pinned;
-  }
   const effectiveQuality = request.quality === "AUTO"
     ? request.networkMetered ? "HIGH" : "HIGHEST"
     : request.quality;
@@ -154,12 +161,22 @@ function preferredFormat(formats, request) {
 
 function orderedFormats(formats, request) {
   const sorted = [...formats].sort(compareFormats);
-  const preferred = preferredFormat(sorted, request);
-  const descending = [...sorted].reverse();
-  return [preferred, ...descending.filter((format) => format !== preferred)];
+  const pinned = request.pinnedItag
+    ? sorted.find((format) => Number(format.itag) === Number(request.pinnedItag))
+    : undefined;
+  const original = sorted.filter((format) => format.is_original);
+  const primary = original.length ? original : sorted;
+  const alternate = original.length ? sorted.filter((format) => !format.is_original) : [];
+  const preferred = preferredFormat(primary, request);
+  return [pinned, preferred, ...[...primary].reverse(), ...[...alternate].reverse()]
+    .filter((format, index, ordered) => format && ordered.indexOf(format) === index);
 }
 
-function extractExpiry(url) {
+function extractExpiry(url, streamingDataExpiry) {
+  const parsedExpiry = streamingDataExpiry instanceof Date
+    ? streamingDataExpiry.getTime()
+    : Number(streamingDataExpiry);
+  if (Number.isFinite(parsedExpiry) && parsedExpiry > Date.now()) return parsedExpiry;
   const value = Number(new URL(url).searchParams.get("expire"));
   return Number.isFinite(value) && value > 0 ? value * 1000 : Date.now() + 300000;
 }
@@ -174,8 +191,47 @@ function playbackTrackingUrl(info) {
   return normalizedString(info.page?.[0]?.playback_tracking?.videostats_playback_url);
 }
 
+function failureMessage(error, fallback = "youtubei.js resolution failed") {
+  if (typeof error === "string") return normalizedString(error) || fallback;
+  if (!error || typeof error !== "object") return fallback;
+  return normalizedString(error.message) ||
+    normalizedString(error.info?.reason) ||
+    normalizedString(error.info?.message) ||
+    normalizedString(error.info?.error_type) ||
+    normalizedString(error.info?.status) ||
+    fallback;
+}
+
+function structuredFailureKind(error) {
+  if (!error || typeof error !== "object") return undefined;
+  const candidates = [error.kind, error.info?.error_type, error.info?.status, error.status];
+  for (const candidate of candidates) {
+    const value = normalizedString(candidate)?.toUpperCase().replace(/[ -]+/g, "_");
+    if (!value) continue;
+    if (FAILURE_KINDS.has(value)) return value;
+    if (
+      value === "AGE_CHECK_REQUIRED" ||
+      value === "AGE_RESTRICTED" ||
+      value === "AGE_VERIFICATION_REQUIRED" ||
+      value === "CONTENT_CHECK_REQUIRED" ||
+      value === "AUTH_REQUIRED"
+    ) return "LOGIN_REQUIRED";
+    if (
+      value === "UNPLAYABLE" ||
+      value === "VIDEO_UNAVAILABLE" ||
+      value === "CONTENT_UNAVAILABLE"
+    ) return "UNAVAILABLE";
+    if (value === "NO_STREAMING_DATA" || value === "FORMAT_NOT_FOUND") return "NO_FORMAT";
+    if (value === "SIGNATURE_DECIPHER_FAILED" || value === "NSIG_DECIPHER_FAILED") return "DECIPHER";
+    if (value === "FETCH_ERROR" || value === "FETCH_FAILED") return "NETWORK";
+  }
+  return undefined;
+}
+
 function failureKind(error) {
-  const message = String(error?.message || error || "youtubei.js resolution failed");
+  const structured = structuredFailureKind(error);
+  if (structured) return structured;
+  const message = failureMessage(error);
   const normalized = message.toLowerCase();
   if (
     normalized.includes("sign in") ||
@@ -192,6 +248,27 @@ function failureKind(error) {
   return "INTERNAL";
 }
 
+function normalizedFailure(error, fallbackMessage) {
+  return {
+    kind: failureKind(error),
+    message: failureMessage(error, fallbackMessage),
+  };
+}
+
+function failurePriority(kind) {
+  switch (kind) {
+    case "LOGIN_REQUIRED": return 9;
+    case "UNAVAILABLE": return 8;
+    case "DECIPHER": return 7;
+    case "NO_FORMAT": return 6;
+    case "TIMEOUT": return 5;
+    case "NETWORK": return 4;
+    case "HTTP": return 3;
+    case "INVALID_RESPONSE": return 2;
+    default: return 1;
+  }
+}
+
 async function resolveWithClient(youtube, request, client) {
   const info = await youtube.getBasicInfo(request.mediaId, {
     client,
@@ -206,7 +283,9 @@ async function resolveWithClient(youtube, request, client) {
   if (formats.length === 0) {
     const message = reason || (status ? `YouTube playability status: ${status}` : "No direct audio format");
     const error = new Error(message);
-    error.kind = status === "LOGIN_REQUIRED" ? "LOGIN_REQUIRED" : status && status !== "OK" ? "UNAVAILABLE" : "NO_FORMAT";
+    error.kind = status && status !== "OK"
+      ? structuredFailureKind({ status }) || "UNAVAILABLE"
+      : "NO_FORMAT";
     throw error;
   }
 
@@ -227,6 +306,7 @@ async function resolveWithClient(youtube, request, client) {
       };
       const userAgent = normalizedString(youtube.session.context?.client?.userAgent);
       if (userAgent) headers["User-Agent"] = userAgent;
+      const audioConfig = info.player_config?.audio_config;
       return {
         url: parsedUrl.toString(),
         headers,
@@ -236,13 +316,17 @@ async function resolveWithClient(youtube, request, client) {
         bitrate: bitrateOf(format),
         sampleRate: sampleRateOf(format) || null,
         contentLength: Number(format.content_length || 0),
-        expiresAtMs: extractExpiry(parsedUrl),
+        expiresAtMs: extractExpiry(parsedUrl, info.streaming_data?.expires),
         runtimeVersion: RUNTIME_VERSION,
         title: normalizedString(basicInfo.title),
         durationSeconds: Number(basicInfo.duration || 0) || null,
         thumbnailUrl: thumbnailUrl(basicInfo),
-        loudnessDb: Number.isFinite(format.loudness_db) ? format.loudness_db : null,
-        perceptualLoudnessDb: null,
+        loudnessDb: Number.isFinite(format.loudness_db)
+          ? format.loudness_db
+          : Number.isFinite(audioConfig?.loudness_db) ? audioConfig.loudness_db : null,
+        perceptualLoudnessDb: Number.isFinite(audioConfig?.perceptual_loudness_db)
+          ? audioConfig.perceptual_loudness_db
+          : null,
         playbackTrackingUrl: playbackTrackingUrl(info),
       };
     } catch (error) {
@@ -276,9 +360,12 @@ async function resolve(requestJson) {
         }
         firstFallback ||= value;
       } catch (error) {
-        const kind = error.kind || failureKind(error);
-        if (!mostRelevantFailure || kind === "LOGIN_REQUIRED" || kind === "DECIPHER") {
-          mostRelevantFailure = { kind, message: String(error.message || error) };
+        const failure = normalizedFailure(error);
+        if (
+          !mostRelevantFailure ||
+          failurePriority(failure.kind) > failurePriority(mostRelevantFailure.kind)
+        ) {
+          mostRelevantFailure = failure;
         }
       }
     }
@@ -290,10 +377,7 @@ async function resolve(requestJson) {
   } catch (error) {
     return JSON.stringify({
       ok: false,
-      error: {
-        kind: error.kind || failureKind(error),
-        message: String(error?.message || error || "youtubei.js resolution failed"),
-      },
+      error: normalizedFailure(error),
     });
   }
 }
