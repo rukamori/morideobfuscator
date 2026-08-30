@@ -16,17 +16,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.IOException
 import java.net.SocketTimeoutException
-import java.util.concurrent.atomic.AtomicBoolean
 
 class YoutubeiResolver(
     context: Context,
@@ -35,33 +31,17 @@ class YoutubeiResolver(
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = YoutubeiHttpClient(networkConfigurationProvider)
     private val diskCache = YoutubeiDiskCache(context.applicationContext)
-    private val primaryWorker =
+    private val worker =
         YoutubeiQuickJsWorker(
             context = context,
             name = "Primary",
             httpClient = httpClient,
             diskCache = diskCache,
         )
-    private val secondaryWorker by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        YoutubeiQuickJsWorker(
-            context = context,
-            name = "Secondary",
-            httpClient = httpClient,
-            diskCache = diskCache,
-        )
-    }
-    private val availableWorkers = Channel<YoutubeiQuickJsWorker>(capacity = MAX_WORKERS)
-    private val workerCreationMutex = Mutex()
-    private val secondaryCreated = AtomicBoolean(false)
     private val backgroundPermit = Semaphore(1)
-    private val playerExtractionPermit = Semaphore(1)
-
-    init {
-        check(availableWorkers.trySend(primaryWorker).isSuccess)
-    }
 
     suspend fun preWarm() {
-        primaryWorker.preWarm()
+        worker.preWarm()
     }
 
     suspend fun resolve(
@@ -69,106 +49,64 @@ class YoutubeiResolver(
         priority: YoutubeiResolutionPriority,
     ): YoutubeiResolvedStream =
         when (priority) {
-            YoutubeiResolutionPriority.FOREGROUND -> resolveWithWorker(request, allowSecondary = true)
+            YoutubeiResolutionPriority.FOREGROUND -> resolveWithWorker(request)
             YoutubeiResolutionPriority.BACKGROUND ->
                 backgroundPermit.withPermit {
-                    resolveWithWorker(request, allowSecondary = false)
+                    resolveWithWorker(request)
                 }
         }
 
     suspend fun invalidateSessions() {
-        primaryWorker.closeRuntime()
-        if (secondaryCreated.get()) secondaryWorker.closeRuntime()
+        worker.closeRuntime()
     }
 
     fun trimMemory(level: Int) {
-        applicationScope.launch {
-            when {
-                level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> invalidateSessions()
-                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && secondaryCreated.get() -> {
-                    workerCreationMutex.withLock {
-                        val available = buildList {
-                            while (true) {
-                                add(availableWorkers.tryReceive().getOrNull() ?: break)
-                            }
-                        }
-                        val canCloseSecondary = available.any { it === secondaryWorker }
-                        available
-                            .filterNot { canCloseSecondary && it === secondaryWorker }
-                            .forEach { worker -> check(availableWorkers.trySend(worker).isSuccess) }
-                        if (canCloseSecondary && secondaryCreated.compareAndSet(true, false)) {
-                            secondaryWorker.closeRuntime()
-                        }
-                    }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+            applicationScope.launch { invalidateSessions() }
+        }
+    }
+
+    private suspend fun resolveWithWorker(request: YoutubeiStreamRequest): YoutubeiResolvedStream {
+        val requestJson = request.toJson().toString()
+        val response =
+            try {
+                withTimeout(RESOLUTION_TIMEOUT_MS) {
+                    worker.resolve(requestJson)
                 }
+            } catch (timeout: TimeoutCancellationException) {
+                throw YoutubeiException(
+                    kind = YoutubeiFailureKind.TIMEOUT,
+                    message = "youtubei.js resolution timed out",
+                    cause = timeout,
+                )
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (timeout: QuickJsInterruptedException) {
+                throw YoutubeiException(
+                    kind = YoutubeiFailureKind.TIMEOUT,
+                    message = "youtubei.js execution timed out",
+                    cause = timeout,
+                )
+            } catch (timeout: SocketTimeoutException) {
+                throw YoutubeiException(
+                    kind = YoutubeiFailureKind.TIMEOUT,
+                    message = timeout.message ?: "youtubei.js network request timed out",
+                    cause = timeout,
+                )
+            } catch (network: IOException) {
+                throw YoutubeiException(
+                    kind = YoutubeiFailureKind.NETWORK,
+                    message = network.message ?: "youtubei.js network request failed",
+                    cause = network,
+                )
+            } catch (throwable: Throwable) {
+                throw YoutubeiException(
+                    kind = YoutubeiFailureKind.INTERNAL,
+                    message = throwable.message ?: "youtubei.js execution failed",
+                    cause = throwable,
+                )
             }
-        }
-    }
-
-    private suspend fun resolveWithWorker(
-        request: YoutubeiStreamRequest,
-        allowSecondary: Boolean,
-    ): YoutubeiResolvedStream {
-        val worker = acquireWorker(allowSecondary)
-        return try {
-            val requestJson = request.toJson().toString()
-            val response =
-                try {
-                    withTimeout(RESOLUTION_TIMEOUT_MS) {
-                        val directResponse = worker.resolve(requestJson, allowPlayer = false)
-                        if (directResponse.requiresPlayer()) {
-                            playerExtractionPermit.withPermit {
-                                worker.resolve(requestJson, allowPlayer = true)
-                            }
-                        } else {
-                            directResponse
-                        }
-                    }
-                } catch (timeout: TimeoutCancellationException) {
-                    throw YoutubeiException(
-                        kind = YoutubeiFailureKind.TIMEOUT,
-                        message = "youtubei.js resolution timed out",
-                        cause = timeout,
-                    )
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (timeout: QuickJsInterruptedException) {
-                    throw YoutubeiException(
-                        kind = YoutubeiFailureKind.TIMEOUT,
-                        message = "youtubei.js execution timed out",
-                        cause = timeout,
-                    )
-                } catch (timeout: SocketTimeoutException) {
-                    throw YoutubeiException(
-                        kind = YoutubeiFailureKind.TIMEOUT,
-                        message = timeout.message ?: "youtubei.js network request timed out",
-                        cause = timeout,
-                    )
-                } catch (network: IOException) {
-                    throw YoutubeiException(
-                        kind = YoutubeiFailureKind.NETWORK,
-                        message = network.message ?: "youtubei.js network request failed",
-                        cause = network,
-                    )
-                } catch (throwable: Throwable) {
-                    throw YoutubeiException(
-                        kind = YoutubeiFailureKind.INTERNAL,
-                        message = throwable.message ?: "youtubei.js execution failed",
-                        cause = throwable,
-                    )
-                }
-            parseResponse(response)
-        } finally {
-            check(availableWorkers.trySend(worker).isSuccess)
-        }
-    }
-
-    private suspend fun acquireWorker(allowSecondary: Boolean): YoutubeiQuickJsWorker {
-        availableWorkers.tryReceive().getOrNull()?.let { return it }
-        if (allowSecondary && secondaryCreated.compareAndSet(false, true)) {
-            return secondaryWorker
-        }
-        return availableWorkers.receive()
+        return parseResponse(response)
     }
 
     private fun parseResponse(response: String): YoutubeiResolvedStream {
@@ -236,13 +174,6 @@ class YoutubeiResolver(
         )
     }
 
-    private fun String.requiresPlayer(): Boolean =
-        runCatching {
-            JSONObject(this)
-                .optJSONObject("error")
-                ?.optString("kind") == PLAYER_REQUIRED_KIND
-        }.getOrDefault(false)
-
     private fun YoutubeiStreamRequest.toJson(): JSONObject =
         JSONObject()
             .put("mediaId", mediaId)
@@ -280,11 +211,9 @@ class YoutubeiResolver(
             ?.takeIf(Double::isFinite)
 
     private companion object {
-        const val MAX_WORKERS = 2
         const val YOUTUBEI_VERSION = "18.0.0"
         const val RESOLUTION_TIMEOUT_MS = 35_000L
         const val DEFAULT_STREAM_LIFETIME_MS = 5L * 60L * 1000L
-        const val PLAYER_REQUIRED_KIND = "PLAYER_REQUIRED"
         val HTTP_SCHEMES = setOf("http", "https")
     }
 }

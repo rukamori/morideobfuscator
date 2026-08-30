@@ -52,10 +52,7 @@ internal class YoutubeiQuickJsWorker(
         }
     }
 
-    suspend fun resolve(
-        requestJson: String,
-        allowPlayer: Boolean,
-    ): String =
+    suspend fun resolve(requestJson: String): String =
         mutex.withLock {
             withContext(dispatcher) {
                 val runtime = ensureInitialized()
@@ -65,8 +62,6 @@ internal class YoutubeiQuickJsWorker(
                             code =
                                 "await globalThis.ArchiveTuneYoutubei.resolve(" +
                                     JSONObject.quote(requestJson) +
-                                    ", " +
-                                    allowPlayer.toString() +
                                     ");",
                             filename = "archivetune-resolve.js",
                         )
