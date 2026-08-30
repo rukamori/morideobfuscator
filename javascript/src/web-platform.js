@@ -41,7 +41,9 @@ function base64ToBytes(value) {
     throw new TypeError("Invalid base64 input");
   }
   const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
-  const bytes = [];
+  const padding = padded.endsWith("==") ? 2 : padded.endsWith("=") ? 1 : 0;
+  const bytes = new Uint8Array((padded.length / 4) * 3 - padding);
+  let outputIndex = 0;
   for (let index = 0; index < padded.length; index += 4) {
     const first = BASE64_ALPHABET.indexOf(padded[index]);
     const second = BASE64_ALPHABET.indexOf(padded[index + 1]);
@@ -51,11 +53,18 @@ function base64ToBytes(value) {
       throw new TypeError("Invalid base64 input");
     }
     const combined = (first << 18) | (second << 12) | (third << 6) | fourth;
-    bytes.push((combined >>> 16) & 255);
-    if (padded[index + 2] !== "=") bytes.push((combined >>> 8) & 255);
-    if (padded[index + 3] !== "=") bytes.push(combined & 255);
+    bytes[outputIndex] = (combined >>> 16) & 255;
+    outputIndex += 1;
+    if (padded[index + 2] !== "=") {
+      bytes[outputIndex] = (combined >>> 8) & 255;
+      outputIndex += 1;
+    }
+    if (padded[index + 3] !== "=") {
+      bytes[outputIndex] = combined & 255;
+      outputIndex += 1;
+    }
   }
-  return new Uint8Array(bytes);
+  return bytes;
 }
 
 function bodyToBytes(body) {

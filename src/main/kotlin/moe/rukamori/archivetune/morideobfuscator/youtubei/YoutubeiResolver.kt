@@ -54,6 +54,7 @@ class YoutubeiResolver(
     private val workerCreationMutex = Mutex()
     private val secondaryCreated = AtomicBoolean(false)
     private val backgroundPermit = Semaphore(1)
+    private val playerExtractionPermit = Semaphore(1)
 
     init {
         check(availableWorkers.trySend(primaryWorker).isSuccess)
@@ -114,7 +115,14 @@ class YoutubeiResolver(
             val response =
                 try {
                     withTimeout(RESOLUTION_TIMEOUT_MS) {
-                        worker.resolve(requestJson)
+                        val directResponse = worker.resolve(requestJson, allowPlayer = false)
+                        if (directResponse.requiresPlayer()) {
+                            playerExtractionPermit.withPermit {
+                                worker.resolve(requestJson, allowPlayer = true)
+                            }
+                        } else {
+                            directResponse
+                        }
                     }
                 } catch (timeout: TimeoutCancellationException) {
                     throw YoutubeiException(
@@ -228,6 +236,13 @@ class YoutubeiResolver(
         )
     }
 
+    private fun String.requiresPlayer(): Boolean =
+        runCatching {
+            JSONObject(this)
+                .optJSONObject("error")
+                ?.optString("kind") == PLAYER_REQUIRED_KIND
+        }.getOrDefault(false)
+
     private fun YoutubeiStreamRequest.toJson(): JSONObject =
         JSONObject()
             .put("mediaId", mediaId)
@@ -269,6 +284,7 @@ class YoutubeiResolver(
         const val YOUTUBEI_VERSION = "18.0.0"
         const val RESOLUTION_TIMEOUT_MS = 35_000L
         const val DEFAULT_STREAM_LIFETIME_MS = 5L * 60L * 1000L
+        const val PLAYER_REQUIRED_KIND = "PLAYER_REQUIRED"
         val HTTP_SCHEMES = setOf("http", "https")
     }
 }

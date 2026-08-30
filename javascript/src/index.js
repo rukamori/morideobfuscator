@@ -1,4 +1,4 @@
-import Innertube, { ClientType, Platform } from "youtubei.js/web.bundle";
+import Innertube, { ClientType, Platform, Player } from "youtubei.js/web.bundle";
 import {
   CustomEvent,
   File,
@@ -33,6 +33,7 @@ const FAILURE_KINDS = new Set([
   "TIMEOUT",
   "INVALID_RESPONSE",
   "INTERNAL",
+  "PLAYER_REQUIRED",
 ]);
 
 installWebPlatform();
@@ -82,6 +83,7 @@ Platform.load({
 
 let session;
 let sessionIdentity;
+let playerInitialization;
 
 function normalizedString(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -115,12 +117,39 @@ async function getSession(request) {
     timezone: normalizedString(request.timezone) || "UTC",
     generate_session_locally: true,
     retrieve_innertube_config: false,
-    retrieve_player: true,
+    retrieve_player: false,
     enable_session_cache: false,
     fetch,
   });
   sessionIdentity = identity;
+  playerInitialization = undefined;
   return session;
+}
+
+async function ensurePlayer(youtube, request) {
+  if (youtube.session.player) return youtube.session.player;
+  if (!playerInitialization) {
+    playerInitialization = Player.create(
+      youtube.session.cache,
+      fetch,
+      normalizedString(request.sessionPoToken),
+    ).then((player) => {
+      youtube.session.player = player;
+      return player;
+    });
+  }
+  const initialization = playerInitialization;
+  try {
+    return await initialization;
+  } catch (error) {
+    const failure = normalizedFailure(error, "youtubei.js player initialization failed");
+    const playerError = new Error(failure.message);
+    playerError.kind = failure.kind;
+    playerError.playerInitialization = true;
+    throw playerError;
+  } finally {
+    if (playerInitialization === initialization) playerInitialization = undefined;
+  }
 }
 
 function bitrateOf(format) {
@@ -141,6 +170,21 @@ function isEligibleAudioFormat(format) {
     !(format.drm_families && format.drm_families.length) &&
     SUPPORTED_AUDIO_MIME_TYPES.has(mimeType) &&
     Boolean(format.url || format.signature_cipher || format.cipher);
+}
+
+function formatRequiresPlayer(format) {
+  if (format.signature_cipher || format.cipher || !normalizedString(format.url)) return true;
+  try {
+    return new URL(format.url).searchParams.has("n");
+  } catch {
+    return true;
+  }
+}
+
+function playerRequiredError() {
+  const error = new Error("A YouTube player is required to decipher this audio format");
+  error.kind = "PLAYER_REQUIRED";
+  return error;
 }
 
 function compareFormats(first, second) {
@@ -265,11 +309,12 @@ function failurePriority(kind) {
     case "NETWORK": return 4;
     case "HTTP": return 3;
     case "INVALID_RESPONSE": return 2;
+    case "PLAYER_REQUIRED": return 10;
     default: return 1;
   }
 }
 
-async function resolveWithClient(youtube, request, client) {
+async function resolveWithClient(youtube, request, client, allowPlayer) {
   const info = await youtube.getBasicInfo(request.mediaId, {
     client,
     po_token: normalizedString(request.videoPoToken),
@@ -289,12 +334,41 @@ async function resolveWithClient(youtube, request, client) {
     throw error;
   }
 
+  const pinnedFormat = request.pinnedItag
+    ? formats.find((format) => Number(format.itag) === Number(request.pinnedItag))
+    : undefined;
+  if (
+    !allowPlayer &&
+    !youtube.session.player &&
+    pinnedFormat &&
+    formatRequiresPlayer(pinnedFormat)
+  ) {
+    throw playerRequiredError();
+  }
+
   let decipherFailure;
+  let playerRequired = false;
   for (const format of orderedFormats(formats, request)) {
+    const requiresPlayer = formatRequiresPlayer(format);
+    if (requiresPlayer && !allowPlayer && !youtube.session.player) {
+      playerRequired = true;
+      continue;
+    }
+    const player = requiresPlayer
+      ? youtube.session.player || await ensurePlayer(youtube, request)
+      : undefined;
     try {
-      const url = await format.decipher(youtube.session.player);
+      const url = await format.decipher(player);
       const parsedUrl = new URL(url);
       if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") continue;
+      const sessionPoToken = normalizedString(request.sessionPoToken);
+      if (
+        sessionPoToken &&
+        parsedUrl.searchParams.get("sabr") !== "1" &&
+        !parsedUrl.searchParams.has("pot")
+      ) {
+        parsedUrl.searchParams.set("pot", sessionPoToken);
+      }
       const mime = String(format.mime_type || "audio/webm");
       const mimeType = mime.split(";", 1)[0];
       const codecs = /codecs="([^"]+)"/.exec(mime)?.[1] || "";
@@ -333,12 +407,13 @@ async function resolveWithClient(youtube, request, client) {
       decipherFailure = error;
     }
   }
+  if (playerRequired && !allowPlayer) throw playerRequiredError();
   const error = new Error(decipherFailure?.message || "youtubei.js could not decipher an audio URL");
   error.kind = "DECIPHER";
   throw error;
 }
 
-async function resolve(requestJson) {
+async function resolve(requestJson, allowPlayer = false) {
   try {
     const request = JSON.parse(requestJson);
     if (!/^[A-Za-z0-9_-]{6,32}$/.test(String(request.mediaId || ""))) {
@@ -354,7 +429,7 @@ async function resolve(requestJson) {
     let mostRelevantFailure;
     for (const client of clients) {
       try {
-        const value = await resolveWithClient(youtube, request, client);
+        const value = await resolveWithClient(youtube, request, client, Boolean(allowPlayer));
         if (!request.pinnedItag || value.formatId === Number(request.pinnedItag)) {
           return JSON.stringify({ ok: true, value });
         }
@@ -367,7 +442,11 @@ async function resolve(requestJson) {
         ) {
           mostRelevantFailure = failure;
         }
+        if (error?.playerInitialization) break;
       }
+    }
+    if (!allowPlayer && mostRelevantFailure?.kind === "PLAYER_REQUIRED") {
+      return JSON.stringify({ ok: false, error: mostRelevantFailure });
     }
     if (firstFallback) return JSON.stringify({ ok: true, value: firstFallback });
     return JSON.stringify({
@@ -388,5 +467,6 @@ globalThis.ArchiveTuneYoutubei = Object.freeze({
   reset() {
     session = undefined;
     sessionIdentity = undefined;
+    playerInitialization = undefined;
   },
 });

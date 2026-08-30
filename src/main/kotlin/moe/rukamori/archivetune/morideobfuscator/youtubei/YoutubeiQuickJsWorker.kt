@@ -10,6 +10,7 @@ package moe.rukamori.archivetune.morideobfuscator.youtubei
 import android.content.Context
 import android.util.Base64
 import com.dokar.quickjs.QuickJs
+import com.dokar.quickjs.QuickJsException
 import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.binding.function
 import com.dokar.quickjs.evaluate
@@ -51,17 +52,30 @@ internal class YoutubeiQuickJsWorker(
         }
     }
 
-    suspend fun resolve(requestJson: String): String =
+    suspend fun resolve(
+        requestJson: String,
+        allowPlayer: Boolean,
+    ): String =
         mutex.withLock {
             withContext(dispatcher) {
                 val runtime = ensureInitialized()
-                runtime.evaluate<String>(
-                    code =
-                        "await globalThis.ArchiveTuneYoutubei.resolve(" +
-                            JSONObject.quote(requestJson) +
-                            ");",
-                    filename = "archivetune-resolve.js",
-                )
+                try {
+                    val response =
+                        runtime.evaluate<String>(
+                            code =
+                                "await globalThis.ArchiveTuneYoutubei.resolve(" +
+                                    JSONObject.quote(requestJson) +
+                                    ", " +
+                                    allowPlayer.toString() +
+                                    ");",
+                            filename = "archivetune-resolve.js",
+                        )
+                    runtime.gc()
+                    response
+                } catch (throwable: Throwable) {
+                    if (throwable.isQuickJsOutOfMemory()) discardRuntime(runtime, throwable)
+                    throw throwable
+                }
             }
         }
 
@@ -125,11 +139,29 @@ internal class YoutubeiQuickJsWorker(
         }
     }
 
+    private fun discardRuntime(
+        runtime: QuickJs,
+        failure: Throwable,
+    ) {
+        if (quickJs === runtime) {
+            quickJs = null
+            initialized = false
+        }
+        try {
+            runtime.close()
+        } catch (closeFailure: Throwable) {
+            failure.addSuppressed(closeFailure)
+        }
+    }
+
+    private fun Throwable.isQuickJsOutOfMemory(): Boolean =
+        this is QuickJsException && message.orEmpty().contains("out of memory", ignoreCase = true)
+
     private companion object {
         const val YOUTUBEI_VERSION = "18.0.0"
         const val BUNDLE_ASSET = "youtubei/youtubei.bundle.js"
         const val JAVASCRIPT_TIMEOUT_MS = 30_000L
-        const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 128L * 1024L * 1024L
+        const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 192L * 1024L * 1024L
         const val JAVASCRIPT_STACK_LIMIT_BYTES = 2L * 1024L * 1024L
         const val MAX_RANDOM_BYTES = 4096
     }
