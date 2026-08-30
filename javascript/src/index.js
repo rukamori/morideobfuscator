@@ -23,6 +23,7 @@ const SUPPORTED_AUDIO_MIME_TYPES = new Set([
 ]);
 const ANONYMOUS_CLIENTS = ["VISIONOS", "ANDROID_VR", "IOS", "YTMUSIC"];
 const AUTHENTICATED_CLIENTS = ["WEB_CREATOR", "YTMUSIC", "WEB_EMBEDDED"];
+const AUTH_COOKIE_NAMES = ["SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID"];
 const FAILURE_KINDS = new Set([
   "LOGIN_REQUIRED",
   "UNAVAILABLE",
@@ -90,11 +91,40 @@ function normalizedString(value) {
   return normalized || undefined;
 }
 
+function cookieValue(cookie, name) {
+  const prefix = `${name}=`;
+  for (const entry of cookie.split(";")) {
+    const normalized = entry.trim();
+    if (!normalized.startsWith(prefix)) continue;
+    return normalizedString(normalized.slice(prefix.length));
+  }
+  return undefined;
+}
+
+function youtubeiCookie(value) {
+  const cookie = normalizedString(value);
+  if (!cookie || cookieValue(cookie, AUTH_COOKIE_NAMES[0])) return cookie;
+  const authenticationValue = AUTH_COOKIE_NAMES
+    .slice(1)
+    .map((name) => cookieValue(cookie, name))
+    .find(Boolean);
+  return authenticationValue ? `${cookie}; SAPISID=${authenticationValue}` : cookie;
+}
+
+function delegatedSessionId(value) {
+  const dataSyncId = normalizedString(value);
+  if (!dataSyncId) return undefined;
+  const separatorIndex = dataSyncId.indexOf("||");
+  if (separatorIndex <= 0 || separatorIndex + 2 >= dataSyncId.length) return undefined;
+  return normalizedString(dataSyncId.slice(0, separatorIndex));
+}
+
 function createSessionIdentity(request) {
   return JSON.stringify({
     authFingerprint: request.authFingerprint,
     cookie: request.cookie,
     visitorData: request.visitorData,
+    dataSyncId: request.dataSyncId,
     sessionPoToken: request.sessionPoToken,
     language: request.language,
     location: request.location,
@@ -105,12 +135,14 @@ function createSessionIdentity(request) {
 async function getSession(request) {
   const identity = createSessionIdentity(request);
   if (session && identity === sessionIdentity) return session;
-  const authenticated = Boolean(normalizedString(request.cookie));
+  const cookie = youtubeiCookie(request.cookie);
+  const authenticated = Boolean(cookie);
   session = await Innertube.create({
     cache: new AndroidCache(),
     client_type: authenticated ? ClientType.WEB_CREATOR : ClientType.VISIONOS,
-    cookie: normalizedString(request.cookie),
+    cookie,
     visitor_data: normalizedString(request.visitorData),
+    on_behalf_of_user: authenticated ? delegatedSessionId(request.dataSyncId) : undefined,
     po_token: normalizedString(request.sessionPoToken),
     lang: normalizedString(request.language) || "en",
     location: normalizedString(request.location) || "US",
