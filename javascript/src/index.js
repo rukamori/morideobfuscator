@@ -12,6 +12,7 @@ import {
   fetch,
   installWebPlatform,
 } from "./web-platform.js";
+import { applyGvsPoToken } from "./stream-url.js";
 
 const RUNTIME_VERSION = "18.0.0";
 const SUPPORTED_AUDIO_MIME_TYPES = new Set([
@@ -141,7 +142,7 @@ async function getSession(request) {
     cookie,
     visitor_data: normalizedString(request.visitorData),
     on_behalf_of_user: authenticated ? delegatedSessionId(request.dataSyncId) : undefined,
-    po_token: normalizedString(request.sessionPoToken),
+    po_token: authenticated ? normalizedString(request.sessionPoToken) : undefined,
     lang: normalizedString(request.language) || "en",
     location: normalizedString(request.location) || "US",
     timezone: normalizedString(request.timezone) || "UTC",
@@ -295,9 +296,10 @@ function playabilityError(status, reason) {
 }
 
 async function resolveWithClient(youtube, request, client) {
+  const supportsGvsPoToken = client === AUTHENTICATED_CLIENT;
   const info = await youtube.getBasicInfo(request.mediaId, {
     client,
-    po_token: normalizedString(request.videoPoToken),
+    po_token: supportsGvsPoToken ? normalizedString(request.videoPoToken) : undefined,
   });
   const status = normalizedString(info.playability_status?.status);
   const reason = normalizedString(info.playability_status?.reason);
@@ -321,19 +323,15 @@ async function resolveWithClient(youtube, request, client) {
     error.kind = "DECIPHER";
     throw error;
   }
-  const parsedUrl = new URL(url);
+  const parsedUrl = applyGvsPoToken(new URL(url), {
+    supportsGvsPoToken,
+    videoPoToken: request.videoPoToken,
+    sessionPoToken: request.sessionPoToken,
+  });
   if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
     const error = new Error("youtubei.js returned an unsupported audio URL");
     error.kind = "DECIPHER";
     throw error;
-  }
-  const sessionPoToken = normalizedString(request.sessionPoToken);
-  if (
-    sessionPoToken &&
-    parsedUrl.searchParams.get("sabr") !== "1" &&
-    !parsedUrl.searchParams.has("pot")
-  ) {
-    parsedUrl.searchParams.set("pot", sessionPoToken);
   }
   const mime = String(format.mime_type || "audio/webm");
   const mimeType = mime.split(";", 1)[0];
