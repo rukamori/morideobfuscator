@@ -175,15 +175,6 @@ function isEligibleAudioFormat(format) {
     Boolean(format.url || format.signature_cipher || format.cipher);
 }
 
-function formatRequiresPlayer(format) {
-  if (format.signature_cipher || format.cipher || !normalizedString(format.url)) return true;
-  try {
-    return new URL(format.url).searchParams.has("n");
-  } catch {
-    return true;
-  }
-}
-
 function compareFormats(first, second) {
   return bitrateOf(first) - bitrateOf(second) ||
     sampleRateOf(first) - sampleRateOf(second) ||
@@ -200,17 +191,15 @@ function preferredFormat(formats, request) {
   return notAboveTarget.length ? notAboveTarget[notAboveTarget.length - 1] : formats[0];
 }
 
-function orderedFormats(formats, request) {
+function selectedFormat(formats, request) {
   const sorted = [...formats].sort(compareFormats);
   const pinned = request.pinnedItag
     ? sorted.find((format) => Number(format.itag) === Number(request.pinnedItag))
     : undefined;
+  if (pinned) return pinned;
   const original = sorted.filter((format) => format.is_original);
   const primary = original.length ? original : sorted;
-  const alternate = original.length ? sorted.filter((format) => !format.is_original) : [];
-  const preferred = preferredFormat(primary, request);
-  return [pinned, preferred, ...[...primary].reverse(), ...[...alternate].reverse()]
-    .filter((format, index, ordered) => format && ordered.indexOf(format) === index);
+  return preferredFormat(primary, request);
 }
 
 function extractExpiry(url, streamingDataExpiry) {
@@ -296,6 +285,15 @@ function normalizedFailure(error, fallbackMessage) {
   };
 }
 
+function playabilityError(status, reason) {
+  const error = new Error(reason || `YouTube playability status: ${status}`);
+  const reasonKind = failureKind(error);
+  error.kind = reasonKind === "LOGIN_REQUIRED"
+    ? reasonKind
+    : structuredFailureKind({ status }) || (reasonKind === "INTERNAL" ? "UNAVAILABLE" : reasonKind);
+  return error;
+}
+
 async function resolveWithClient(youtube, request, client) {
   const info = await youtube.getBasicInfo(request.mediaId, {
     client,
@@ -303,91 +301,107 @@ async function resolveWithClient(youtube, request, client) {
   });
   const status = normalizedString(info.playability_status?.status);
   const reason = normalizedString(info.playability_status?.reason);
+  if (status && status !== "OK") throw playabilityError(status, reason);
   const formats = [
     ...(info.streaming_data?.adaptive_formats || []),
     ...(info.streaming_data?.formats || []),
   ].filter(isEligibleAudioFormat);
   if (formats.length === 0) {
-    const message = reason || (status ? `YouTube playability status: ${status}` : "No direct audio format");
-    const error = new Error(message);
-    error.kind = status && status !== "OK"
-      ? structuredFailureKind({ status }) || "UNAVAILABLE"
-      : "NO_FORMAT";
+    const error = new Error(reason || "No direct audio format");
+    error.kind = "NO_FORMAT";
     throw error;
   }
 
-  let decipherFailure;
-  for (const format of orderedFormats(formats, request)) {
-    const requiresPlayer = formatRequiresPlayer(format);
-    const player = requiresPlayer ? youtube.session.player : undefined;
-    try {
-      const url = await format.decipher(player);
-      const parsedUrl = new URL(url);
-      if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") continue;
-      const sessionPoToken = normalizedString(request.sessionPoToken);
-      if (
-        sessionPoToken &&
-        parsedUrl.searchParams.get("sabr") !== "1" &&
-        !parsedUrl.searchParams.has("pot")
-      ) {
-        parsedUrl.searchParams.set("pot", sessionPoToken);
-      }
-      const mime = String(format.mime_type || "audio/webm");
-      const mimeType = mime.split(";", 1)[0];
-      const codecs = /codecs="([^"]+)"/.exec(mime)?.[1] || "";
-      const basicInfo = info.basic_info || {};
-      const headers = {
-        Accept: "*/*",
-        Origin: "https://www.youtube.com",
-        Referer: "https://www.youtube.com/",
-      };
-      const userAgent = normalizedString(youtube.session.context?.client?.userAgent);
-      if (userAgent) headers["User-Agent"] = userAgent;
-      const audioConfig = info.player_config?.audio_config;
-      return {
-        url: parsedUrl.toString(),
-        headers,
-        formatId: Number(format.itag),
-        mimeType,
-        codecs,
-        bitrate: bitrateOf(format),
-        sampleRate: sampleRateOf(format) || null,
-        contentLength: Number(format.content_length || 0),
-        expiresAtMs: extractExpiry(parsedUrl, info.streaming_data?.expires),
-        runtimeVersion: RUNTIME_VERSION,
-        title: normalizedString(basicInfo.title),
-        durationSeconds: Number(basicInfo.duration || 0) || null,
-        thumbnailUrl: thumbnailUrl(basicInfo),
-        loudnessDb: Number.isFinite(format.loudness_db)
-          ? format.loudness_db
-          : Number.isFinite(audioConfig?.loudness_db) ? audioConfig.loudness_db : null,
-        perceptualLoudnessDb: Number.isFinite(audioConfig?.perceptual_loudness_db)
-          ? audioConfig.perceptual_loudness_db
-          : null,
-        playbackTrackingUrl: playbackTrackingUrl(info),
-      };
-    } catch (error) {
-      decipherFailure = error;
-    }
+  const format = selectedFormat(formats, request);
+  let url;
+  try {
+    url = await format.decipher(youtube.session.player);
+  } catch (cause) {
+    const error = new Error(failureMessage(cause, "youtubei.js could not decipher the audio URL"));
+    error.kind = "DECIPHER";
+    throw error;
   }
-  const error = new Error(decipherFailure?.message || "youtubei.js could not decipher an audio URL");
-  error.kind = "DECIPHER";
-  throw error;
+  const parsedUrl = new URL(url);
+  if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+    const error = new Error("youtubei.js returned an unsupported audio URL");
+    error.kind = "DECIPHER";
+    throw error;
+  }
+  const sessionPoToken = normalizedString(request.sessionPoToken);
+  if (
+    sessionPoToken &&
+    parsedUrl.searchParams.get("sabr") !== "1" &&
+    !parsedUrl.searchParams.has("pot")
+  ) {
+    parsedUrl.searchParams.set("pot", sessionPoToken);
+  }
+  const mime = String(format.mime_type || "audio/webm");
+  const mimeType = mime.split(";", 1)[0];
+  const codecs = /codecs="([^"]+)"/.exec(mime)?.[1] || "";
+  const basicInfo = info.basic_info || {};
+  const headers = {
+    Accept: "*/*",
+    Origin: "https://www.youtube.com",
+    Referer: "https://www.youtube.com/",
+  };
+  const userAgent = normalizedString(youtube.session.context?.client?.userAgent);
+  if (userAgent) headers["User-Agent"] = userAgent;
+  const audioConfig = info.player_config?.audio_config;
+  return {
+    url: parsedUrl.toString(),
+    headers,
+    formatId: Number(format.itag),
+    mimeType,
+    codecs,
+    bitrate: bitrateOf(format),
+    sampleRate: sampleRateOf(format) || null,
+    contentLength: Number(format.content_length || 0),
+    expiresAtMs: extractExpiry(parsedUrl, info.streaming_data?.expires),
+    runtimeVersion: RUNTIME_VERSION,
+    title: normalizedString(basicInfo.title),
+    durationSeconds: Number(basicInfo.duration || 0) || null,
+    thumbnailUrl: thumbnailUrl(basicInfo),
+    loudnessDb: Number.isFinite(format.loudness_db)
+      ? format.loudness_db
+      : Number.isFinite(audioConfig?.loudness_db) ? audioConfig.loudness_db : null,
+    perceptualLoudnessDb: Number.isFinite(audioConfig?.perceptual_loudness_db)
+      ? audioConfig.perceptual_loudness_db
+      : null,
+    playbackTrackingUrl: playbackTrackingUrl(info),
+  };
 }
 
-async function resolve(requestJson) {
+function parseRequest(requestJson) {
+  const request = JSON.parse(requestJson);
+  if (!/^[A-Za-z0-9_-]{6,32}$/.test(String(request.mediaId || ""))) {
+    const error = new Error("Invalid YouTube media ID");
+    error.kind = "INVALID_RESPONSE";
+    throw error;
+  }
+  return request;
+}
+
+async function prepare(requestJson) {
   try {
-    const request = JSON.parse(requestJson);
-    if (!/^[A-Za-z0-9_-]{6,32}$/.test(String(request.mediaId || ""))) {
-      return JSON.stringify({
-        ok: false,
-        error: { kind: "INVALID_RESPONSE", message: "Invalid YouTube media ID" },
-      });
+    await getSession(parseRequest(requestJson));
+    return JSON.stringify({ ok: true });
+  } catch (error) {
+    return JSON.stringify({ ok: false, error: normalizedFailure(error) });
+  }
+}
+
+async function resolvePrepared(requestJson) {
+  try {
+    const request = parseRequest(requestJson);
+    const identity = createSessionIdentity(request);
+    if (!session || identity !== sessionIdentity) {
+      const error = new Error("youtubei.js session was not prepared");
+      error.kind = "INTERNAL";
+      throw error;
     }
-    const youtube = await getSession(request);
     const authenticated = Boolean(normalizedString(request.cookie));
     const client = authenticated ? AUTHENTICATED_CLIENT : ANONYMOUS_CLIENT;
-    const value = await resolveWithClient(youtube, request, client);
+    const value = await resolveWithClient(session, request, client);
     return JSON.stringify({ ok: true, value });
   } catch (error) {
     return JSON.stringify({
@@ -399,7 +413,8 @@ async function resolve(requestJson) {
 
 globalThis.ArchiveTuneYoutubei = Object.freeze({
   version: RUNTIME_VERSION,
-  resolve,
+  prepare,
+  resolvePrepared,
   reset() {
     session = undefined;
     sessionIdentity = undefined;
