@@ -2,6 +2,7 @@ import { URL, URLSearchParams } from "whatwg-url";
 
 const BASE64_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const PLAYER_SOURCE_ERROR_PREFIX = "ARCHIVETUNE_PLAYER_SOURCE_ERROR|";
 
 function encodeUtf8(value) {
   const encoded = unescape(encodeURIComponent(String(value)));
@@ -290,6 +291,52 @@ class Response extends BodyContainer {
   }
 }
 
+class TextResponse extends Response {
+  #text;
+
+  constructor(text, init = {}) {
+    super(null, init);
+    this.#text = String(text);
+  }
+
+  #consumeText() {
+    if (this.bodyUsed) throw new TypeError("Body has already been consumed");
+    this.bodyUsed = true;
+    return this.#text;
+  }
+
+  arrayBuffer() {
+    return Promise.resolve(encodeUtf8(this.#consumeText()).buffer);
+  }
+
+  blob() {
+    return Promise.resolve(new Blob([this.#consumeText()]));
+  }
+
+  bytes() {
+    return Promise.resolve(encodeUtf8(this.#consumeText()));
+  }
+
+  json() {
+    return Promise.resolve(JSON.parse(this.#consumeText()));
+  }
+
+  text() {
+    return Promise.resolve(this.#consumeText());
+  }
+
+  clone() {
+    if (this.bodyUsed) throw new TypeError("Body has already been consumed");
+    return new TextResponse(this.#text, {
+      status: this.status,
+      statusText: this.statusText,
+      headers: this.headers,
+      url: this.url,
+      redirected: this.redirected,
+    });
+  }
+}
+
 class FormData {
   #entries = [];
 
@@ -366,8 +413,48 @@ class ReadableStream {
   }
 }
 
+function isPlayerScriptRequest(request) {
+  if (request.method !== "GET") return false;
+  const url = new URL(request.url);
+  if (url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  if (host !== "www.youtube.com" && host !== "youtube.com") return false;
+  return /^\/s\/player\/[A-Za-z0-9._-]+\/player_es6\.vflset\/[A-Za-z0-9._-]+\/base\.js$/.test(
+    url.pathname,
+  );
+}
+
+function playerSourceError(payload) {
+  const details = payload.startsWith(PLAYER_SOURCE_ERROR_PREFIX)
+    ? payload.slice(PLAYER_SOURCE_ERROR_PREFIX.length)
+    : "";
+  const separator = details.indexOf("|");
+  const kind = separator > 0 ? details.slice(0, separator) : "NETWORK";
+  const message = separator > 0 ? details.slice(separator + 1) : "Player script request failed";
+  const error = new TypeError(message || "Player script request failed");
+  error.kind = kind || "NETWORK";
+  return error;
+}
+
 async function fetch(input, init = {}) {
   const request = new Request(input, init);
+  if (isPlayerScriptRequest(request)) {
+    const source = await globalThis.__archiveTunePlayerSource(
+      JSON.stringify({
+        url: request.url,
+        method: request.method,
+        headers: Object.fromEntries(request.headers),
+      }),
+    );
+    if (!source || source.startsWith(PLAYER_SOURCE_ERROR_PREFIX)) {
+      throw playerSourceError(source || "");
+    }
+    return new TextResponse(source, {
+      status: 200,
+      statusText: "OK",
+      url: request.url,
+    });
+  }
   const responseJson = await globalThis.__archiveTuneHttp(
     JSON.stringify({
       url: request.url,
