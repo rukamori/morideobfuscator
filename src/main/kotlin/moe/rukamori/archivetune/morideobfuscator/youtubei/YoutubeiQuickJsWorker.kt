@@ -57,10 +57,22 @@ internal class YoutubeiQuickJsWorker(
             withContext(dispatcher) {
                 val runtime = ensureInitialized()
                 try {
+                    val preparation =
+                        runtime.evaluate<String>(
+                            code =
+                                "await globalThis.ArchiveTuneYoutubei.prepare(" +
+                                    JSONObject.quote(requestJson) +
+                                    ");",
+                            filename = "archivetune-prepare.js",
+                        )
+                    runtime.gc()
+                    if (!JSONObject(preparation).optBoolean("ok")) {
+                        return@withContext preparation
+                    }
                     val response =
                         runtime.evaluate<String>(
                             code =
-                                "await globalThis.ArchiveTuneYoutubei.resolve(" +
+                                "await globalThis.ArchiveTuneYoutubei.resolvePrepared(" +
                                     JSONObject.quote(requestJson) +
                                     ");",
                             filename = "archivetune-resolve.js",
@@ -68,7 +80,15 @@ internal class YoutubeiQuickJsWorker(
                     runtime.gc()
                     response
                 } catch (throwable: Throwable) {
-                    if (throwable.isQuickJsOutOfMemory()) discardRuntime(runtime, throwable)
+                    if (throwable.isQuickJsOutOfMemory()) {
+                        discardRuntime(runtime, throwable)
+                    } else {
+                        try {
+                            runtime.gc()
+                        } catch (gcFailure: Throwable) {
+                            throwable.addSuppressed(gcFailure)
+                        }
+                    }
                     throw throwable
                 }
             }
@@ -94,6 +114,9 @@ internal class YoutubeiQuickJsWorker(
             runtime.evaluationTimeoutMillis = JAVASCRIPT_TIMEOUT_MS
             runtime.asyncFunction<String, String>("__archiveTuneHttp") { request ->
                 httpClient.execute(request)
+            }
+            runtime.asyncFunction<String, String>("__archiveTunePlayerSource") { request ->
+                httpClient.executePlayerScript(request)
             }
             runtime.asyncFunction<String, String?>("__archiveTuneCacheRead") { key ->
                 diskCache.read(key)
@@ -156,7 +179,7 @@ internal class YoutubeiQuickJsWorker(
         const val YOUTUBEI_VERSION = "18.0.0"
         const val BUNDLE_ASSET = "youtubei/youtubei.bundle.js"
         const val JAVASCRIPT_TIMEOUT_MS = 30_000L
-        const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 192L * 1024L * 1024L
+        const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 256L * 1024L * 1024L
         const val JAVASCRIPT_STACK_LIMIT_BYTES = 2L * 1024L * 1024L
         const val MAX_RANDOM_BYTES = 4096
     }
