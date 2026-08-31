@@ -55,6 +55,23 @@ internal class YoutubeiHttpClient(
             failure(FailureKind.INTERNAL, "youtubei.js HTTP bridge failed")
         }
 
+    suspend fun executePlayerScript(requestJson: String): String =
+        try {
+            executePlayerScriptRequest(requestJson)
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: SocketTimeoutException) {
+            playerSourceFailure(FailureKind.TIMEOUT, "YouTube player script request timed out")
+        } catch (exception: IOException) {
+            playerSourceFailure(FailureKind.NETWORK, "YouTube player script request failed")
+        } catch (exception: JSONException) {
+            playerSourceFailure(FailureKind.INVALID_RESPONSE, "YouTube player script request was invalid")
+        } catch (exception: IllegalArgumentException) {
+            playerSourceFailure(FailureKind.INVALID_RESPONSE, "YouTube player script request was rejected")
+        } catch (exception: Exception) {
+            playerSourceFailure(FailureKind.INTERNAL, "YouTube player script bridge failed")
+        }
+
     private suspend fun executeRequest(requestJson: String): String {
         val parsed = JSONObject(requestJson)
         var url = parsed.getString("url").toHttpUrlOrNull()
@@ -98,7 +115,7 @@ internal class YoutubeiHttpClient(
                     redirected = true
                     return@use
                 }
-                val responseBytes = value.readLimitedBody()
+                val responseBytes = value.readLimitedBody(MAX_RESPONSE_BYTES)
                 return JSONObject()
                     .put("ok", true)
                     .put("status", value.code)
@@ -111,6 +128,53 @@ internal class YoutubeiHttpClient(
             }
         }
         return failure(FailureKind.NETWORK, "Extraction redirect failed")
+    }
+
+    private suspend fun executePlayerScriptRequest(requestJson: String): String {
+        val parsed = JSONObject(requestJson)
+        var url = parsed.getString("url").toHttpUrlOrNull()
+            ?: return playerSourceFailure(FailureKind.INVALID_RESPONSE, "Invalid player script URL")
+        require(parsed.optString("method", "GET").uppercase() == "GET")
+        validatePlayerScriptUrl(url)
+        var headers = parsed.optJSONObject("headers")
+
+        repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            val request = buildRequest(url, "GET", headers, null)
+            val response = currentClient().newCall(request).await()
+            response.use { value ->
+                validatePlayerScriptUrl(value.request.url)
+                if (value.isRedirect) {
+                    if (redirectCount == MAX_REDIRECTS) {
+                        throw IOException("Too many player script redirects")
+                    }
+                    val location = value.header("Location")
+                        ?: throw IOException("Player script redirect did not include a location")
+                    val redirectedUrl = value.request.url.resolve(location)
+                        ?: throw IOException("Invalid player script redirect location")
+                    validatePlayerScriptUrl(redirectedUrl)
+                    if (!value.request.url.isSameOrigin(redirectedUrl)) {
+                        headers = headers?.withoutHeaders(SENSITIVE_REDIRECT_HEADERS)
+                    }
+                    url = redirectedUrl
+                    return@use
+                }
+                if (!value.isSuccessful) {
+                    return playerSourceFailure(
+                        FailureKind.HTTP,
+                        "YouTube player script request failed with HTTP ${value.code}",
+                    )
+                }
+                val source = value.readLimitedBody(MAX_PLAYER_SCRIPT_BYTES).toString(Charsets.UTF_8)
+                if (source.isBlank() || source.startsWith(PLAYER_SOURCE_ERROR_PREFIX)) {
+                    return playerSourceFailure(
+                        FailureKind.INVALID_RESPONSE,
+                        "YouTube returned an invalid player script",
+                    )
+                }
+                return source
+            }
+        }
+        return playerSourceFailure(FailureKind.NETWORK, "Player script redirect failed")
     }
 
     private fun buildRequest(
@@ -190,6 +254,15 @@ internal class YoutubeiHttpClient(
         require(ALLOWED_HOST_SUFFIXES.any { suffix -> host == suffix || host.endsWith(".$suffix") })
     }
 
+    private fun validatePlayerScriptUrl(url: HttpUrl) {
+        require(url.isHttps)
+        require(
+            url.host.equals("www.youtube.com", ignoreCase = true) ||
+                url.host.equals("youtube.com", ignoreCase = true),
+        )
+        require(PLAYER_SCRIPT_PATH.matches(url.encodedPath))
+    }
+
     private fun isAllowedHeader(
         name: String,
         value: String,
@@ -213,11 +286,11 @@ internal class YoutubeiHttpClient(
             }
         }
 
-    private fun Response.readLimitedBody(): ByteArray {
+    private fun Response.readLimitedBody(maxBytes: Int): ByteArray {
         val responseBody = body ?: return ByteArray(0)
         val declaredLength = responseBody.contentLength()
-        require(declaredLength < 0L || declaredLength <= MAX_RESPONSE_BYTES)
-        val output = ByteArrayOutputStream(minOf(MAX_RESPONSE_BYTES, 64 * 1024))
+        require(declaredLength < 0L || declaredLength <= maxBytes)
+        val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
         responseBody.byteStream().use { input ->
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             var total = 0
@@ -225,7 +298,7 @@ internal class YoutubeiHttpClient(
                 val count = input.read(buffer)
                 if (count < 0) break
                 total += count
-                require(total <= MAX_RESPONSE_BYTES)
+                require(total <= maxBytes)
                 output.write(buffer, 0, count)
             }
         }
@@ -276,7 +349,13 @@ internal class YoutubeiHttpClient(
             .put("message", message)
             .toString()
 
+    private fun playerSourceFailure(
+        kind: FailureKind,
+        message: String,
+    ): String = "$PLAYER_SOURCE_ERROR_PREFIX${kind.name}|$message"
+
     private enum class FailureKind {
+        HTTP,
         TIMEOUT,
         NETWORK,
         INVALID_RESPONSE,
@@ -290,11 +369,15 @@ internal class YoutubeiHttpClient(
 
     private companion object {
         const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+        const val MAX_PLAYER_SCRIPT_BYTES = 4 * 1024 * 1024
         const val MAX_REDIRECTS = 5
         const val CONNECT_TIMEOUT_SECONDS = 15L
         const val READ_TIMEOUT_SECONDS = 20L
         const val WRITE_TIMEOUT_SECONDS = 20L
         const val CALL_TIMEOUT_SECONDS = 30L
+        const val PLAYER_SOURCE_ERROR_PREFIX = "ARCHIVETUNE_PLAYER_SOURCE_ERROR|"
+        val PLAYER_SCRIPT_PATH =
+            Regex("^/s/player/[A-Za-z0-9._-]+/player_es6\\.vflset/[A-Za-z0-9._-]+/base\\.js$")
         val ALLOWED_METHODS = setOf("GET", "POST", "HEAD")
         val BODY_HEADERS = setOf("content-type")
         val SENSITIVE_REDIRECT_HEADERS = setOf("authorization", "cookie")
