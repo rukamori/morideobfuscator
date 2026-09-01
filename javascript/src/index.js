@@ -275,9 +275,33 @@ function structuredFailureKind(error) {
   return undefined;
 }
 
+function parsedHttpErrorInfo(error) {
+  if (typeof error?.info !== "string") return undefined;
+  try {
+    return JSON.parse(error.info);
+  } catch {
+    return undefined;
+  }
+}
+
+function httpStatusOf(error) {
+  const candidates = [error?.httpStatus, error?.status, error?.response?.status];
+  const info = parsedHttpErrorInfo(error);
+  candidates.push(info?.error?.code, info?.code);
+  for (const candidate of candidates) {
+    const status = Number(candidate);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+  }
+  const match = /status code (\d{3})/i.exec(String(error?.message || ""));
+  if (!match) return undefined;
+  const status = Number(match[1]);
+  return status >= 100 && status <= 599 ? status : undefined;
+}
+
 function failureKind(error) {
   const structured = structuredFailureKind(error);
   if (structured) return structured;
+  if (httpStatusOf(error)) return "HTTP";
   const message = failureMessage(error);
   const normalized = message.toLowerCase();
   if (
@@ -296,10 +320,12 @@ function failureKind(error) {
 }
 
 function normalizedFailure(error, fallbackMessage) {
-  return {
+  const failure = {
     kind: failureKind(error),
     message: failureMessage(error, fallbackMessage),
   };
+  const httpStatus = httpStatusOf(error);
+  return httpStatus ? { ...failure, httpStatus } : failure;
 }
 
 function playabilityError(status, reason) {
@@ -395,6 +421,33 @@ async function withoutSessionPoToken(youtube, block) {
   }
 }
 
+async function getBasicInfoWithPoTokenFallback(youtube, request, client) {
+  const poToken = client === AUTHENTICATED_CLIENT
+    ? normalizedString(request.videoPoToken) || normalizedString(request.sessionPoToken)
+    : undefined;
+  if (!poToken) {
+    return {
+      info: await youtube.getBasicInfo(request.mediaId, { client }),
+      poTokenRejected: false,
+    };
+  }
+  try {
+    return {
+      info: await youtube.getBasicInfo(request.mediaId, { client, po_token: poToken }),
+      poTokenRejected: false,
+    };
+  } catch (error) {
+    if (httpStatusOf(error) !== 400) throw error;
+    return {
+      info: await withoutSessionPoToken(
+        youtube,
+        () => youtube.getBasicInfo(request.mediaId, { client }),
+      ),
+      poTokenRejected: true,
+    };
+  }
+}
+
 async function resolveCatalogReplacement(youtube, request, sourceInfo) {
   const identity = catalogIdentity(sourceInfo);
   if (!identity) return undefined;
@@ -424,12 +477,13 @@ async function resolveCatalogReplacement(youtube, request, sourceInfo) {
 }
 
 async function resolveWithClient(youtube, request, client, preparedInfo) {
-  const supportsGvsPoToken = client === AUTHENTICATED_CLIENT;
-  const info = preparedInfo ||
-    await youtube.getBasicInfo(request.mediaId, {
-      client,
-      po_token: supportsGvsPoToken ? normalizedString(request.videoPoToken) : undefined,
-    });
+  let supportsGvsPoToken = client === AUTHENTICATED_CLIENT;
+  let info = preparedInfo;
+  if (!info) {
+    const result = await getBasicInfoWithPoTokenFallback(youtube, request, client);
+    info = result.info;
+    if (result.poTokenRejected) supportsGvsPoToken = false;
+  }
   const status = normalizedString(info.playability_status?.status);
   const reason = normalizedString(info.playability_status?.reason);
   if (status && status !== "OK") {
