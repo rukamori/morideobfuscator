@@ -43,6 +43,7 @@ internal class YoutubeiQuickJsWorker(
     private var initialized = false
 
     private var quickJs: QuickJs? = null
+    private var activeVideoPoTokenProvider: (suspend (String) -> String?)? = null
 
     suspend fun preWarm() {
         mutex.withLock {
@@ -52,10 +53,14 @@ internal class YoutubeiQuickJsWorker(
         }
     }
 
-    suspend fun resolve(requestJson: String): String =
+    suspend fun resolve(
+        requestJson: String,
+        videoPoTokenProvider: suspend (String) -> String?,
+    ): String =
         mutex.withLock {
             withContext(dispatcher) {
                 val runtime = ensureInitialized()
+                activeVideoPoTokenProvider = videoPoTokenProvider
                 try {
                     val preparation =
                         runtime.evaluate<String>(
@@ -90,6 +95,8 @@ internal class YoutubeiQuickJsWorker(
                         }
                     }
                     throw throwable
+                } finally {
+                    activeVideoPoTokenProvider = null
                 }
             }
         }
@@ -117,6 +124,9 @@ internal class YoutubeiQuickJsWorker(
             }
             runtime.asyncFunction<String, String>("__archiveTunePlayerSource") { request ->
                 httpClient.executePlayerScript(request)
+            }
+            runtime.asyncFunction<String, String?>("__archiveTuneVideoPoToken") { mediaId ->
+                activeVideoPoTokenProvider?.invoke(mediaId)
             }
             runtime.asyncFunction<String, String?>("__archiveTuneCacheRead") { key ->
                 diskCache.read(key)
