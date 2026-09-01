@@ -24,15 +24,9 @@ const SUPPORTED_AUDIO_MIME_TYPES = new Set([
 ]);
 const ANONYMOUS_CLIENT = "VISIONOS";
 const AUTHENTICATED_CLIENT = "WEB_CREATOR";
-const CATALOG_REPLACEMENT_CLIENTS = ["IOS", "ANDROID", "MWEB", "YTMUSIC", "VISIONOS"];
+const CATALOG_CLIENT = "IOS";
 const CATALOG_DURATION_TOLERANCE_SECONDS = 2;
 const MAX_CATALOG_REPLACEMENT_CANDIDATES = 5;
-const RECOVERABLE_CATALOG_CLIENT_FAILURES = new Set([
-  "LOGIN_REQUIRED",
-  "UNAVAILABLE",
-  "NO_FORMAT",
-  "DECIPHER",
-]);
 const AUTH_COOKIE_NAMES = ["SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID"];
 const FAILURE_KINDS = new Set([
   "LOGIN_REQUIRED",
@@ -93,6 +87,8 @@ Platform.load({
 
 let session;
 let sessionIdentity;
+let catalogSession;
+let catalogSessionIdentity;
 
 function normalizedString(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -163,6 +159,33 @@ async function getSession(request) {
   });
   sessionIdentity = identity;
   return session;
+}
+
+function createCatalogSessionIdentity(request) {
+  return JSON.stringify({
+    language: request.language,
+    location: request.location,
+    timezone: request.timezone,
+  });
+}
+
+async function getCatalogSession(request) {
+  const identity = createCatalogSessionIdentity(request);
+  if (catalogSession && identity === catalogSessionIdentity) return catalogSession;
+  catalogSession = await Innertube.create({
+    cache: new AndroidCache(),
+    client_type: ClientType.IOS,
+    lang: normalizedString(request.language) || "en",
+    location: normalizedString(request.location) || "US",
+    timezone: normalizedString(request.timezone) || "UTC",
+    generate_session_locally: true,
+    retrieve_innertube_config: false,
+    retrieve_player: true,
+    enable_session_cache: false,
+    fetch,
+  });
+  catalogSessionIdentity = identity;
+  return catalogSession;
 }
 
 function bitrateOf(format) {
@@ -411,79 +434,37 @@ function isSameCatalogRecording(info, identity) {
     Math.abs(durationSeconds - identity.durationSeconds) <= CATALOG_DURATION_TOLERANCE_SECONDS;
 }
 
-async function withoutSessionPoToken(youtube, block) {
-  const sessionPoToken = youtube.session.po_token;
-  youtube.session.po_token = undefined;
-  try {
-    return await block();
-  } finally {
-    youtube.session.po_token = sessionPoToken;
-  }
-}
-
-async function getBasicInfoWithPoTokenFallback(youtube, request, client) {
-  const poToken = client === AUTHENTICATED_CLIENT
-    ? normalizedString(request.videoPoToken) || normalizedString(request.sessionPoToken)
-    : undefined;
-  if (!poToken) {
-    return {
-      info: await youtube.getBasicInfo(request.mediaId, { client }),
-      poTokenRejected: false,
-    };
-  }
-  try {
-    return {
-      info: await youtube.getBasicInfo(request.mediaId, { client, po_token: poToken }),
-      poTokenRejected: false,
-    };
-  } catch (error) {
-    if (httpStatusOf(error) !== 400) throw error;
-    return {
-      info: await withoutSessionPoToken(
-        youtube,
-        () => youtube.getBasicInfo(request.mediaId, { client }),
-      ),
-      poTokenRejected: true,
-    };
-  }
-}
-
-async function resolveCatalogReplacement(youtube, request, sourceInfo) {
+async function resolveCatalogReplacement(request, sourceInfo) {
   const identity = catalogIdentity(sourceInfo);
   if (!identity) return undefined;
+  const youtube = await getCatalogSession(request);
   const search = await youtube.music.search(identity.query, { type: "song" });
   const candidates = catalogSearchCandidates(search, identity, request.mediaId);
   if (candidates.length !== 1) return undefined;
 
-  return withoutSessionPoToken(youtube, async () => {
-    const candidate = candidates[0];
-    const replacementRequest = {
+  const candidate = candidates[0];
+  const info = await youtube.getBasicInfo(candidate.id);
+  if (!isSameCatalogRecording(info, identity)) return undefined;
+  return resolveWithClient(
+    youtube,
+    {
       ...request,
       mediaId: candidate.id,
       sessionPoToken: undefined,
       videoPoToken: undefined,
-    };
-    for (const client of CATALOG_REPLACEMENT_CLIENTS) {
-      const info = await youtube.getBasicInfo(candidate.id, { client });
-      if (!isSameCatalogRecording(info, identity)) continue;
-      try {
-        return await resolveWithClient(youtube, replacementRequest, client, info);
-      } catch (error) {
-        if (!RECOVERABLE_CATALOG_CLIENT_FAILURES.has(failureKind(error))) throw error;
-      }
-    }
-    return undefined;
-  });
+    },
+    CATALOG_CLIENT,
+    info,
+  );
 }
 
 async function resolveWithClient(youtube, request, client, preparedInfo) {
-  let supportsGvsPoToken = client === AUTHENTICATED_CLIENT;
-  let info = preparedInfo;
-  if (!info) {
-    const result = await getBasicInfoWithPoTokenFallback(youtube, request, client);
-    info = result.info;
-    if (result.poTokenRejected) supportsGvsPoToken = false;
-  }
+  const supportsGvsPoToken = client === AUTHENTICATED_CLIENT;
+  const info = preparedInfo ||
+    await youtube.getBasicInfo(request.mediaId, {
+      client,
+      po_token: supportsGvsPoToken ? normalizedString(request.videoPoToken) : undefined,
+    });
   const status = normalizedString(info.playability_status?.status);
   const reason = normalizedString(info.playability_status?.reason);
   if (status && status !== "OK") {
@@ -591,7 +572,7 @@ async function resolvePrepared(requestJson) {
       value = await resolveWithClient(session, request, client);
     } catch (error) {
       if (failureKind(error) !== "UNAVAILABLE" || !error.videoInfo) throw error;
-      value = await resolveCatalogReplacement(session, request, error.videoInfo);
+      value = await resolveCatalogReplacement(request, error.videoInfo);
       if (!value) throw error;
     }
     return JSON.stringify({ ok: true, value });
@@ -610,5 +591,7 @@ globalThis.ArchiveTuneYoutubei = Object.freeze({
   reset() {
     session = undefined;
     sessionIdentity = undefined;
+    catalogSession = undefined;
+    catalogSessionIdentity = undefined;
   },
 });
