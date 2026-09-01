@@ -28,6 +28,7 @@ enum class YoutubeiFailureKind {
     LOGIN_REQUIRED,
     UNAVAILABLE,
     NO_FORMAT,
+    PO_TOKEN,
     NETWORK,
     HTTP,
     DECIPHER,
