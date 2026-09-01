@@ -47,12 +47,20 @@ class YoutubeiResolver(
     suspend fun resolve(
         request: YoutubeiStreamRequest,
         priority: YoutubeiResolutionPriority,
+        videoPoTokenProvider: suspend (String) -> String? = { null },
     ): YoutubeiResolvedStream =
         when (priority) {
-            YoutubeiResolutionPriority.FOREGROUND -> resolveWithWorker(request)
+            YoutubeiResolutionPriority.FOREGROUND ->
+                resolveWithWorker(
+                    request = request,
+                    videoPoTokenProvider = videoPoTokenProvider,
+                )
             YoutubeiResolutionPriority.BACKGROUND ->
                 backgroundPermit.withPermit {
-                    resolveWithWorker(request)
+                    resolveWithWorker(
+                        request = request,
+                        videoPoTokenProvider = videoPoTokenProvider,
+                    )
                 }
         }
 
@@ -66,12 +74,18 @@ class YoutubeiResolver(
         }
     }
 
-    private suspend fun resolveWithWorker(request: YoutubeiStreamRequest): YoutubeiResolvedStream {
+    private suspend fun resolveWithWorker(
+        request: YoutubeiStreamRequest,
+        videoPoTokenProvider: suspend (String) -> String?,
+    ): YoutubeiResolvedStream {
         val requestJson = request.toJson().toString()
         val response =
             try {
                 withTimeout(RESOLUTION_TIMEOUT_MS) {
-                    worker.resolve(requestJson)
+                    worker.resolve(
+                        requestJson = requestJson,
+                        videoPoTokenProvider = videoPoTokenProvider,
+                    )
                 }
             } catch (timeout: TimeoutCancellationException) {
                 throw YoutubeiException(
