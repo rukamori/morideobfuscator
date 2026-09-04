@@ -150,12 +150,8 @@ internal class YoutubeiQuickJsWorker(
                     .also(secureRandom::nextBytes)
                     .let { Base64.encodeToString(it, Base64.NO_WRAP) }
             }
-            val source =
-                applicationContext.assets
-                    .open(BUNDLE_ASSET)
-                    .bufferedReader(Charsets.UTF_8)
-                    .use { it.readText() }
-            runtime.evaluate<Unit>(source, BUNDLE_ASSET)
+            evaluateAsset(runtime, RUNTIME_POLYFILLS_ASSET)
+            evaluateAsset(runtime, BUNDLE_ASSET)
             val version = runtime.evaluate<String>("globalThis.ArchiveTuneYoutubei.version;")
             check(version == YOUTUBEI_VERSION)
             quickJs = runtime
@@ -165,6 +161,18 @@ internal class YoutubeiQuickJsWorker(
             runtime.close()
             throw throwable
         }
+    }
+
+    private suspend fun evaluateAsset(
+        runtime: QuickJs,
+        assetName: String,
+    ) {
+        val source =
+            applicationContext.assets
+                .open(assetName)
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+        runtime.evaluate<Unit>(source, assetName)
     }
 
     private fun discardRuntime(
@@ -188,6 +196,7 @@ internal class YoutubeiQuickJsWorker(
     private companion object {
         const val YOUTUBEI_VERSION = "18.0.0"
         const val BUNDLE_ASSET = "youtubei/youtubei.bundle.js"
+        const val RUNTIME_POLYFILLS_ASSET = "youtubei/runtime-polyfills.js"
         const val JAVASCRIPT_TIMEOUT_MS = 30_000L
         const val JAVASCRIPT_MEMORY_LIMIT_BYTES = 256L * 1024L * 1024L
         const val JAVASCRIPT_STACK_LIMIT_BYTES = 2L * 1024L * 1024L
