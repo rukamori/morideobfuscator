@@ -69,7 +69,7 @@ class YoutubeiResolver(
     }
 
     fun trimMemory(level: Int) {
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
             applicationScope.launch { invalidateSessions() }
         }
     }
