@@ -287,7 +287,7 @@ internal class YoutubeiHttpClient(
         }
 
     private fun Response.readLimitedBody(maxBytes: Int): ByteArray {
-        val responseBody = body ?: return ByteArray(0)
+        val responseBody = body
         val declaredLength = responseBody.contentLength()
         require(declaredLength < 0L || declaredLength <= maxBytes)
         val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
@@ -320,9 +320,9 @@ internal class YoutubeiHttpClient(
                 object : Callback {
                     override fun onFailure(
                         call: Call,
-                        exception: IOException,
+                        e: IOException,
                     ) {
-                        if (continuation.isActive) continuation.resumeWithException(exception)
+                        if (continuation.isActive) continuation.resumeWithException(e)
                     }
 
                     override fun onResponse(
