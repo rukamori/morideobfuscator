@@ -10,6 +10,7 @@ package moe.rukamori.archivetune.morideobfuscator.youtubei
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import com.dokar.quickjs.QuickJsInterruptedException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -26,10 +27,16 @@ import java.net.SocketTimeoutException
 
 class YoutubeiResolver(
     context: Context,
+    private val diagnostics: (String) -> Unit,
     networkConfigurationProvider: () -> YoutubeiNetworkConfiguration,
 ) {
+    constructor(
+        context: Context,
+        networkConfigurationProvider: () -> YoutubeiNetworkConfiguration,
+    ) : this(context, {}, networkConfigurationProvider)
+
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val httpClient = YoutubeiHttpClient(networkConfigurationProvider)
+    private val httpClient = YoutubeiHttpClient(networkConfigurationProvider, diagnostics)
     private val diskCache = YoutubeiDiskCache(context.applicationContext)
     private val worker =
         YoutubeiQuickJsWorker(
@@ -37,6 +44,7 @@ class YoutubeiResolver(
             name = "Primary",
             httpClient = httpClient,
             diskCache = diskCache,
+            diagnostics = diagnostics,
         )
     private val backgroundPermit = Semaphore(1)
 
@@ -79,6 +87,8 @@ class YoutubeiResolver(
         videoPoTokenProvider: suspend (String) -> String?,
     ): YoutubeiResolvedStream {
         val requestJson = request.toJson().toString()
+        val startedAt = SystemClock.elapsedRealtime()
+        diagnostics("Resolution started mediaId=${request.mediaId} timeoutMs=$RESOLUTION_TIMEOUT_MS")
         val response =
             try {
                 withTimeout(RESOLUTION_TIMEOUT_MS) {
@@ -88,12 +98,14 @@ class YoutubeiResolver(
                     )
                 }
             } catch (timeout: TimeoutCancellationException) {
+                diagnostics("Resolution timeout elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                 throw YoutubeiException(
                     kind = YoutubeiFailureKind.TIMEOUT,
                     message = "youtubei.js resolution timed out",
                     cause = timeout,
                 )
             } catch (cancellation: CancellationException) {
+                diagnostics("Resolution cancelled elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                 throw cancellation
             } catch (timeout: QuickJsInterruptedException) {
                 throw YoutubeiException(
@@ -120,7 +132,9 @@ class YoutubeiResolver(
                     cause = throwable,
                 )
             }
-        return parseResponse(response)
+        return parseResponse(response).also {
+            diagnostics("Resolution complete elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+        }
     }
 
     private fun parseResponse(response: String): YoutubeiResolvedStream {
