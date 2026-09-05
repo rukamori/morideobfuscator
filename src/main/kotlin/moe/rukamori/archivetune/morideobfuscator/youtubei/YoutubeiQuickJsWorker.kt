@@ -8,12 +8,15 @@
 package moe.rukamori.archivetune.morideobfuscator.youtubei
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Base64
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.QuickJsException
+import com.dokar.quickjs.QuickJsInterruptedException
 import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.binding.function
 import com.dokar.quickjs.evaluate
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,9 +29,10 @@ import java.util.concurrent.Executors
 
 internal class YoutubeiQuickJsWorker(
     context: Context,
-    name: String,
+    private val name: String,
     private val httpClient: YoutubeiHttpClient,
     private val diskCache: YoutubeiDiskCache,
+    private val diagnostics: (String) -> Unit,
 ) {
     private val applicationContext = context.applicationContext
     private val dispatcher =
@@ -62,7 +66,7 @@ internal class YoutubeiQuickJsWorker(
                 val runtime = ensureInitialized()
                 activeVideoPoTokenProvider = videoPoTokenProvider
                 try {
-                    val preparation =
+                    val preparation = traceStage("prepare-player") {
                         runtime.evaluate<String>(
                             code =
                                 "await globalThis.ArchiveTuneYoutubei.prepare(" +
@@ -70,11 +74,12 @@ internal class YoutubeiQuickJsWorker(
                                     ");",
                             filename = "archivetune-prepare.js",
                         )
+                    }
                     runtime.gc()
                     if (!JSONObject(preparation).optBoolean("ok")) {
                         return@withContext preparation
                     }
-                    val response =
+                    val response = traceStage("resolve-stream") {
                         runtime.evaluate<String>(
                             code =
                                 "await globalThis.ArchiveTuneYoutubei.resolvePrepared(" +
@@ -82,10 +87,15 @@ internal class YoutubeiQuickJsWorker(
                                     ");",
                             filename = "archivetune-resolve.js",
                         )
+                    }
                     runtime.gc()
                     response
                 } catch (throwable: Throwable) {
-                    if (throwable.isQuickJsOutOfMemory()) {
+                    if (
+                        throwable is CancellationException ||
+                        throwable is QuickJsInterruptedException ||
+                        throwable.isQuickJsOutOfMemory()
+                    ) {
                         discardRuntime(runtime, throwable)
                     } else {
                         try {
@@ -104,9 +114,10 @@ internal class YoutubeiQuickJsWorker(
     suspend fun closeRuntime() {
         mutex.withLock {
             withContext(dispatcher) {
-                quickJs?.close()
+                val runtime = quickJs
                 quickJs = null
                 initialized = false
+                runtime?.close()
             }
         }
     }
@@ -158,7 +169,7 @@ internal class YoutubeiQuickJsWorker(
             initialized = true
             return runtime
         } catch (throwable: Throwable) {
-            runtime.close()
+            discardRuntime(runtime, throwable)
             throw throwable
         }
     }
@@ -172,7 +183,25 @@ internal class YoutubeiQuickJsWorker(
                 .open(assetName)
                 .bufferedReader(Charsets.UTF_8)
                 .use { it.readText() }
-        runtime.evaluate<Unit>(source, assetName)
+        traceStage("load-$assetName") {
+            runtime.evaluate<Unit>(source, assetName)
+        }
+    }
+
+    private suspend fun <T> traceStage(
+        stage: String,
+        block: suspend () -> T,
+    ): T {
+        val startedAt = SystemClock.elapsedRealtime()
+        diagnostics("Worker $name $stage started")
+        return try {
+            block().also {
+                diagnostics("Worker $name $stage complete elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+            }
+        } catch (exception: Exception) {
+            diagnostics("Worker $name $stage failed type=${exception.javaClass.simpleName} elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+            throw exception
+        }
     }
 
     private fun discardRuntime(
@@ -183,6 +212,7 @@ internal class YoutubeiQuickJsWorker(
             quickJs = null
             initialized = false
         }
+        diagnostics("Worker $name discarded type=${failure.javaClass.simpleName}")
         try {
             runtime.close()
         } catch (closeFailure: Throwable) {
