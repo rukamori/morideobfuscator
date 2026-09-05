@@ -7,6 +7,7 @@
 
 package moe.rukamori.archivetune.morideobfuscator.youtubei
 
+import android.os.SystemClock
 import android.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -27,11 +28,11 @@ import java.io.IOException
 import java.net.Proxy
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 internal class YoutubeiHttpClient(
     private val configurationProvider: () -> YoutubeiNetworkConfiguration,
+    private val diagnostics: (String) -> Unit,
 ) {
     private val clientLock = Any()
 
@@ -88,8 +89,7 @@ internal class YoutubeiHttpClient(
 
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             val request = buildRequest(url, method, headers, body)
-            val response = currentClient().newCall(request).await()
-            response.use { value ->
+            val result = currentClient().newCall(request).await { value ->
                 validateUrl(value.request.url)
                 if (value.isRedirect) {
                     if (redirectCount == MAX_REDIRECTS) {
@@ -113,10 +113,10 @@ internal class YoutubeiHttpClient(
                     }
                     url = redirectedUrl
                     redirected = true
-                    return@use
+                    return@await null
                 }
                 val responseBytes = value.readLimitedBody(MAX_RESPONSE_BYTES)
-                return JSONObject()
+                JSONObject()
                     .put("ok", true)
                     .put("status", value.code)
                     .put("statusText", value.message)
@@ -126,6 +126,7 @@ internal class YoutubeiHttpClient(
                     .put("bodyBase64", Base64.encodeToString(responseBytes, Base64.NO_WRAP))
                     .toString()
             }
+            if (result != null) return result
         }
         return failure(FailureKind.NETWORK, "Extraction redirect failed")
     }
@@ -140,8 +141,7 @@ internal class YoutubeiHttpClient(
 
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             val request = buildRequest(url, "GET", headers, null)
-            val response = currentClient().newCall(request).await()
-            response.use { value ->
+            val result = currentClient().newCall(request).await { value ->
                 validatePlayerScriptUrl(value.request.url)
                 if (value.isRedirect) {
                     if (redirectCount == MAX_REDIRECTS) {
@@ -156,23 +156,24 @@ internal class YoutubeiHttpClient(
                         headers = headers?.withoutHeaders(SENSITIVE_REDIRECT_HEADERS)
                     }
                     url = redirectedUrl
-                    return@use
+                    return@await null
                 }
                 if (!value.isSuccessful) {
-                    return playerSourceFailure(
+                    return@await playerSourceFailure(
                         FailureKind.HTTP,
                         "YouTube player script request failed with HTTP ${value.code}",
                     )
                 }
                 val source = value.readLimitedBody(MAX_PLAYER_SCRIPT_BYTES).toString(Charsets.UTF_8)
                 if (source.isBlank() || source.startsWith(PLAYER_SOURCE_ERROR_PREFIX)) {
-                    return playerSourceFailure(
+                    return@await playerSourceFailure(
                         FailureKind.INVALID_RESPONSE,
                         "YouTube returned an invalid player script",
                     )
                 }
-                return source
+                source
             }
+            if (result != null) return result
         }
         return playerSourceFailure(FailureKind.NETWORK, "Player script redirect failed")
     }
@@ -313,8 +314,17 @@ internal class YoutubeiHttpClient(
             }
         }
 
-    private suspend fun Call.await(): Response =
+    private suspend fun <T> Call.await(consume: (Response) -> T): T =
         suspendCancellableCoroutine { continuation ->
+            val startedAt = SystemClock.elapsedRealtime()
+            val stage =
+                when {
+                    request().url.encodedPath == "/iframe_api" -> "player-id"
+                    PLAYER_SCRIPT_PATH.matches(request().url.encodedPath) -> "player-script"
+                    request().url.encodedPath == "/youtubei/v1/player" -> "player-response"
+                    else -> "youtube-api"
+                }
+            diagnostics("HTTP $stage started")
             continuation.invokeOnCancellation { cancel() }
             enqueue(
                 object : Callback {
@@ -322,6 +332,7 @@ internal class YoutubeiHttpClient(
                         call: Call,
                         e: IOException,
                     ) {
+                        diagnostics("HTTP $stage failed type=${e.javaClass.simpleName} elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
                         if (continuation.isActive) continuation.resumeWithException(e)
                     }
 
@@ -329,11 +340,19 @@ internal class YoutubeiHttpClient(
                         call: Call,
                         response: Response,
                     ) {
-                        if (continuation.isActive) {
-                            continuation.resume(response)
-                        } else {
+                        if (!continuation.isActive) {
                             response.close()
+                            return
                         }
+                        val result: Result<T> =
+                            try {
+                                Result.success(response.use(consume))
+                            } catch (exception: Throwable) {
+                                Result.failure(exception)
+                            }
+                        val outcome = result.exceptionOrNull()?.javaClass?.simpleName ?: "complete"
+                        diagnostics("HTTP $stage $outcome status=${response.code} elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+                        continuation.resumeWith(result)
                     }
                 },
             )
