@@ -1,3 +1,53 @@
+(function () {
+    "use strict";
+
+    const arrayPrototype = Array.prototype;
+    const nativeJoin = arrayPrototype.join;
+    const nativeToLocaleString = arrayPrototype.toLocaleString;
+    const apply = Reflect.apply;
+    const activeArrays = new WeakSet();
+    const maxConversionDepth = 128;
+    let conversionDepth = 0;
+
+    function convertArray(receiver, method, args) {
+        if (receiver === null || receiver === undefined) {
+            return apply(method, receiver, args);
+        }
+
+        const object = Object(receiver);
+        if (activeArrays.has(object)) {
+            return "";
+        }
+        if (conversionDepth >= maxConversionDepth) {
+            throw new RangeError("Array string conversion is nested too deeply");
+        }
+
+        activeArrays.add(object);
+        conversionDepth += 1;
+        try {
+            return apply(method, object, args);
+        } finally {
+            conversionDepth -= 1;
+            activeArrays.delete(object);
+        }
+    }
+
+    const methods = {
+        join(separator) {
+            return convertArray(this, nativeJoin, [separator]);
+        },
+        toLocaleString() {
+            return convertArray(this, nativeToLocaleString, arguments);
+        },
+    };
+
+    for (const name of ["join", "toLocaleString"]) {
+        const descriptor = Object.getOwnPropertyDescriptor(arrayPrototype, name);
+        descriptor.value = methods[name];
+        Object.defineProperty(arrayPrototype, name, descriptor);
+    }
+})();
+
 (function (global) {
     if (typeof global.structuredClone === "function") {
         return;
