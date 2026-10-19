@@ -31,7 +31,7 @@ const SUPPORTED_AUDIO_MIME_TYPES = new Set([
   "audio/mpeg",
   "audio/3gpp",
 ]);
-const ANONYMOUS_CLIENT = "VISIONOS";
+const ANONYMOUS_CLIENT = "MWEB";
 const AUTHENTICATED_CLIENT = "WEB_CREATOR";
 const AUTHENTICATED_CLIENT_VERSION = "1.20260708.06.00";
 const CATALOG_DURATION_TOLERANCE_SECONDS = 2;
@@ -156,11 +156,11 @@ async function getSession(request) {
   const authenticated = Boolean(cookie);
   session = await Innertube.create({
     cache: new AndroidCache(),
-    client_type: authenticated ? ClientType.WEB_CREATOR : ClientType.VISIONOS,
+    client_type: authenticated ? ClientType.WEB_CREATOR : ClientType.MWEB,
     cookie,
     visitor_data: normalizedString(request.visitorData),
     on_behalf_of_user: authenticated ? delegatedSessionId(request.dataSyncId) : undefined,
-    po_token: authenticated ? normalizedString(request.sessionPoToken) : undefined,
+    po_token: normalizedString(request.sessionPoToken),
     lang: normalizedString(request.language) || "en",
     location: normalizedString(request.location) || "US",
     timezone: normalizedString(request.timezone) || "UTC",
@@ -616,7 +616,7 @@ async function resolveCatalogReplacement(youtube, request, sourceInfo) {
 }
 
 async function resolveWithClient(youtube, request, client, preparedInfo) {
-  const supportsGvsPoToken = client === AUTHENTICATED_CLIENT;
+  const supportsGvsPoToken = client === AUTHENTICATED_CLIENT || client === ANONYMOUS_CLIENT;
   if (supportsGvsPoToken && !preparedInfo) await ensurePlayerMetadata(youtube);
   const info = preparedInfo ||
     await youtube.getBasicInfo(request.mediaId, {
