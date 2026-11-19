@@ -13,6 +13,7 @@ import java.security.MessageDigest
 internal class YoutubeiRequestAuthentication private constructor(
     private val cookie: String,
     private val delegatedSessionId: String?,
+    private val accountIndex: Int,
 ) {
     private val cookies =
         cookie.split(';').mapNotNull { entry ->
@@ -45,7 +46,7 @@ internal class YoutubeiRequestAuthentication private constructor(
             .header("Authorization", authorization)
             .header("Origin", origin)
             .header("X-Origin", origin)
-            .header("X-Goog-AuthUser", "0")
+            .header("X-Goog-AuthUser", accountIndex.toString())
             .header("X-Youtube-Bootstrap-Logged-In", "true")
             .apply {
                 if (delegatedSessionId != null) {
@@ -73,6 +74,7 @@ internal class YoutubeiRequestAuthentication private constructor(
 
     companion object {
         private val AUTHENTICATED_HOSTS = setOf("www.youtube.com", "music.youtube.com")
+        private const val DEFAULT_ACCOUNT_INDEX = 0
 
         fun fromRequest(request: JSONObject): YoutubeiRequestAuthentication? {
             val cookie = request.optString("cookie").trim().takeIf { it.isNotEmpty() && it != "null" }
@@ -80,9 +82,11 @@ internal class YoutubeiRequestAuthentication private constructor(
             val dataSyncId = request.optString("dataSyncId").trim().takeIf { it.isNotEmpty() && it != "null" }
             val first = dataSyncId?.substringBefore("||")?.trim()?.takeIf(String::isNotEmpty)
             val second = dataSyncId?.substringAfter("||", "")?.trim()?.takeIf(String::isNotEmpty)
+            val accountIndex = request.optInt("accountIndex", DEFAULT_ACCOUNT_INDEX)
             return YoutubeiRequestAuthentication(
                 cookie = cookie,
                 delegatedSessionId = first.takeIf { second != null },
+                accountIndex = accountIndex.takeIf { it >= 0 } ?: DEFAULT_ACCOUNT_INDEX,
             )
         }
     }
