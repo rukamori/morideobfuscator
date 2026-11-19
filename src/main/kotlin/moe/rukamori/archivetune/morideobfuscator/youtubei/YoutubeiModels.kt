@@ -46,6 +46,7 @@ data class YoutubeiStreamRequest(
     val cookie: String? = null,
     val visitorData: String? = null,
     val dataSyncId: String? = null,
+    val accountIndex: Int? = null,
     val sessionPoToken: String? = null,
     val videoPoToken: String? = null,
     val language: String = "en",
