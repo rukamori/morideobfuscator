@@ -207,6 +207,7 @@ class YoutubeiResolver(
             .put("cookie", cookie)
             .put("visitorData", visitorData)
             .put("dataSyncId", dataSyncId)
+            .put("accountIndex", accountIndex)
             .put("sessionPoToken", sessionPoToken)
             .put("videoPoToken", videoPoToken)
             .put("language", language)
